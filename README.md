@@ -416,7 +416,7 @@ to_can:                # VSS actuation targets → CAN
     allow_add: true
 ```
 
-### Three things that will bite you
+### Four things that will bite you
 
 **Quote `ON` and `OFF`.** YAML 1.1 reads bare `on`, `off`, `yes`, `no` as
 booleans. Two of the six `LowVoltageSystemState` values are `ON` and `OFF`, so
@@ -478,6 +478,10 @@ connection.
 A **malformed entry** is dropped and reported; the rest run. A **structural**
 problem — unreadable file, broken peer section, nothing usable at all — exits
 non-zero, because starting would only hide it behind a healthy-looking container.
+
+Each skip and warning carries a `direction` field — `to_vss` or `to_can` — naming
+the section the entry lives in, so a `/stats` reader can tell which way a broken
+mapping was pointing.
 
 ---
 
@@ -571,7 +575,7 @@ and both gRPC connections are closed.
 
 ```bash
 uv sync --dev
-uv run pytest -q          # 237 tests, no vCar or databroker needed
+uv run pytest -q          # 241 tests, no vCar or databroker needed
 ```
 
 The suite uses fake peers throughout. Both loops and validation were additionally
