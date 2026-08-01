@@ -1,0 +1,37 @@
+# The image needs src/ and pyproject.toml. Everything else is either irrelevant
+# to a running bridge or actively unwanted inside it.
+
+# Local environments and caches
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+uv.lock
+
+# Tests are run in CI and locally, never in the shipped image.
+tests/
+
+# Operator data. A real mapping can name internal signals and may reference a
+# token path; the image must not bake one in. mapping.example.yaml is
+# documentation and lives in the repo, not the runtime image.
+mapping.yaml
+mapping.example.yaml
+*.local.yaml
+
+# Neighbouring packages that are not part of this service.
+cpd-core-only-1.0.0/
+cpd-core-only-1.0.0.tar.gz
+vss-vcar/
+vss-vcar.zip
+
+# Docs and build output
+docs/
+dist/
+*.md
+!README.md
+
+# Never send VCS metadata to the build daemon.
+.git/
+.gitignore

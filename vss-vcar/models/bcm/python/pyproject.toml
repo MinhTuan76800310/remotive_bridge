@@ -1,0 +1,14 @@
+[project]
+name = "vss-hmi-vcar-bcm"
+description = "vss_hmi_vcar BCM behavioral model — provides VSS_VehicleState, reacts to VC_To_HMI"
+version = "1.0.0"
+requires-python = ">=3.10,<4.0"
+dependencies = ["structlog==25.4.0", "remotivelabs-topology~=0.15.0"]
+
+[tool.uv.build-backend]
+module-root = ""
+module-name = ["bcm"]
+
+[build-system]
+requires = ["uv_build>=0.9.0,<0.10.0"]
+build-backend = "uv_build"

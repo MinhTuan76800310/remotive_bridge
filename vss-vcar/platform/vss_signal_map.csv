@@ -1,0 +1,7 @@
+vss_path,frame,signal
+Vehicle.Cabin.HMI.TelltaleId,VC_To_HMI,TelltaleId
+Vehicle.Cabin.HMI.ChimeId,VC_To_HMI,ChimeId
+Vehicle.Cabin.ChildPresence.IsDetected,VSS_VehicleState,Vehicle_Cabin_ChildPresence_IsDetected
+Vehicle.LowVoltageSystemState,VSS_VehicleState,Vehicle_LowVoltageSystemState
+Vehicle.Body.Lights.Hazard.IsSignaling,VSS_VehicleState,Vehicle_Body_Lights_Hazard_IsSignaling
+Vehicle.Body.Horn.IsActive,VSS_VehicleState,Vehicle_Body_Horn_IsActive

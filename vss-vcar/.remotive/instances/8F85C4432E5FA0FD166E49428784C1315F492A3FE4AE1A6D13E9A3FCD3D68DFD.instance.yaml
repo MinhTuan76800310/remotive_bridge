@@ -1,0 +1,107 @@
+---
+schema: remotive-topology-instance:0.17
+name: vss_hmi_vcar
+includes:
+  - ../../models/python_models.instance.yaml
+  - ../../instances/can_over_udp.instance.yaml
+  - ../../models/bcm/python.instance.yaml
+  - ../../models/vc/python.instance.yaml
+channels:
+  VehicleCAN:
+    type: can
+    driver:
+      type: udp
+      subnet: 10.1.0.0/24
+      target_host: 230.0.0.1
+      port: 14000
+ecus:
+  BCM:
+    channels:
+      VehicleCAN:
+        
+    models:
+      bcm:
+        type: container
+        container:
+          profiles: []
+          build:
+            dockerfile: ../../Dockerfile
+            target: model
+            args:
+              - MODEL_PATH=bcm/python
+          volumes: []
+          ports: []
+          environment: []
+          depends_on: []
+          command: python -m bcm
+          cap_add: []
+          devices: []
+          extra_hosts: []
+  VC:
+    channels:
+      VehicleCAN:
+        
+    models:
+      vc:
+        type: container
+        container:
+          profiles: []
+          build:
+            dockerfile: ../../Dockerfile
+            target: model
+            args:
+              - MODEL_PATH=vc/python
+          volumes: []
+          ports: []
+          environment: []
+          depends_on: []
+          command: python -m vc
+          cap_add: []
+          devices: []
+          extra_hosts: []
+  topology:
+    channels:
+      VehicleCAN:
+        config:
+          type: can
+    models: {}
+containers: {}
+settings:
+  docker:
+    
+  api:
+    port: 50051
+    ssl_port: 50443
+  remotivebroker:
+    start_timeout: 60
+  topology_broker:
+    channels: {}
+  can:
+    default_driver: udp
+  lin:
+    
+platform:
+  includes: []
+  channels:
+    VehicleCAN:
+      type: can
+      database: ../../platform/databases/VehicleState.dbc
+      baudrate: 500000
+  ecus:
+    BCM:
+      source:
+        - ../../platform/databases/VehicleState.dbc
+      channels:
+        VehicleCAN:
+          
+    VC:
+      source:
+        - ../../platform/databases/VehicleState.dbc
+      channels:
+        VehicleCAN:
+          
+    topology:
+      source: []
+      channels:
+        VehicleCAN:
+          

@@ -1,0 +1,15 @@
+schema: remotive-topology-instance:0.17
+
+name: vss_hmi_vcar
+
+includes:
+  - ../models/python_models.instance.yaml
+  - ./can_over_udp.instance.yaml
+
+platform:
+  includes:
+    - ../platform/vss-hmi-vcar.platform.yaml
+
+ecus:
+  BCM: {}
+  VC: {}

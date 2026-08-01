@@ -1,0 +1,47 @@
+[project]
+name = "kx-vss-bridge"
+version = "0.1.0"
+description = "Standalone RemotiveLabs to KUKSA VSS signal bridge"
+requires-python = ">=3.12,<4.0"
+dependencies = [
+    # Pinned exactly. 0.9.1 is the version kx_ecu runs against, and the version
+    # every API claim in the design was verified against. 0.13.x changes the
+    # subscribe surface, so a floating pin silently changes behaviour.
+    "remotivelabs-broker==0.9.1",
+    # 0.5.2 speaks kuksa.val.v2 internally. Its Datapoint/set semantics are
+    # load-bearing here (see transform.py and remotive_to_vss.py).
+    "kuksa-client==0.5.2",
+    "PyYAML>=6.0.1,<7",
+    "aiohttp>=3.9,<4",
+    "structlog>=25.4.0,<26",
+]
+
+[project.scripts]
+kx-vss-bridge = "kx_vss_bridge.__main__:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0,<9",
+    "pytest-asyncio>=0.24,<2",
+    "hypothesis>=6.100,<7",
+]
+
+[build-system]
+# Widened from kx_ecu's `<0.10.0`: the installed uv is 0.11.x, and the narrow
+# bound makes uv warn on every build that it is out of the declared range.
+requires = ["uv_build>=0.9.0,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = "src"
+module-name = ["kx_vss_bridge"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# This machine exports PYTHONPATH=/opt/ros/jazzy/... which leaks ROS 2 into the
+# venv. Its pytest plugins fail to import (`launch_testing` needs `lark`, absent
+# here) and abort collection before any bridge test runs. Disabling them by
+# entry-point name keeps `uv run pytest` working from any shell, rather than
+# relying on every caller to remember `env -u PYTHONPATH`.
+addopts = "-p no:launch_testing -p no:launch_ros"

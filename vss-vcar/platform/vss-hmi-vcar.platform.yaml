@@ -1,0 +1,19 @@
+schema: remotive-topology-platform:0.17
+
+# One CAN channel is enough: both frames live on it.
+#   VSS_VehicleState  BCM -> VC   (4 VSS state signals)
+#   VC_To_HMI         VC  -> BCM  (TelltaleId, ChimeId)
+# VSS path <-> frame.signal mapping: ./vss_signal_map.csv
+channels:
+  VehicleCAN:
+    database: ./databases/VehicleState.dbc
+    type: can
+    baudrate: 500000
+
+ecus:
+  BCM:
+    channels:
+      VehicleCAN:
+  VC:
+    channels:
+      VehicleCAN:

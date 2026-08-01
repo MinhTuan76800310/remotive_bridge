@@ -1,0 +1,47 @@
+VERSION "1.0"
+
+NS_ :
+    BO_
+    SG_
+    BA_DEF_
+    BA_
+    CM_
+    VAL_
+    BU_
+
+BU_:
+    BCM
+    VC
+
+BA_DEF_ BO_ "GenMsgCycleTime" FLOAT 0 10000;
+BA_DEF_ SG_ "GenSigStartValue" FLOAT 0 0;
+
+BO_ 512 VSS_VehicleState: 8 BCM
+  SG_ Vehicle_Cabin_ChildPresence_IsDetected : 0|1@1+ (1,0) [0|1] ""  VC
+  SG_ Vehicle_Body_Lights_Hazard_IsSignaling : 1|1@1+ (1,0) [0|1] ""  VC
+  SG_ Vehicle_Body_Horn_IsActive : 2|1@1+ (1,0) [0|1] ""  VC
+  SG_ Vehicle_LowVoltageSystemState : 8|8@1+ (1,0) [0|5] ""  VC
+
+BO_ 513 VC_To_HMI: 8 VC
+  SG_ TelltaleId : 0|8@1+ (1,0) [0|255] ""  BCM
+  SG_ ChimeId : 8|8@1+ (1,0) [0|255] ""  BCM
+
+CM_ SG_ 512 Vehicle_Cabin_ChildPresence_IsDetected "VSS: Vehicle.Cabin.ChildPresence.IsDetected";
+CM_ SG_ 512 Vehicle_Body_Lights_Hazard_IsSignaling "VSS: Vehicle.Body.Lights.Hazard.IsSignaling";
+CM_ SG_ 512 Vehicle_Body_Horn_IsActive "VSS: Vehicle.Body.Horn.IsActive";
+CM_ SG_ 512 Vehicle_LowVoltageSystemState "VSS: Vehicle.LowVoltageSystemState";
+CM_ SG_ 513 TelltaleId "VSS: Vehicle.Cabin.HMI.TelltaleId";
+CM_ SG_ 513 ChimeId "VSS: Vehicle.Cabin.HMI.ChimeId";
+
+BA_ "GenMsgCycleTime" BO_ 512 100;
+BA_ "GenMsgCycleTime" BO_ 513 100;
+BA_ "GenSigStartValue" SG_ 512 Vehicle_Cabin_ChildPresence_IsDetected 0;
+BA_ "GenSigStartValue" SG_ 512 Vehicle_Body_Lights_Hazard_IsSignaling 0;
+BA_ "GenSigStartValue" SG_ 512 Vehicle_Body_Horn_IsActive 0;
+BA_ "GenSigStartValue" SG_ 512 Vehicle_LowVoltageSystemState 4;
+BA_ "GenSigStartValue" SG_ 513 TelltaleId 0;
+BA_ "GenSigStartValue" SG_ 513 ChimeId 0;
+
+VAL_ 512 Vehicle_LowVoltageSystemState 0 "UNDEFINED" 1 "LOCK" 2 "OFF" 3 "ACC" 4 "ON" 5 "START" ;
+VAL_ 513 TelltaleId 0 "NONE" 1 "CHILD_PRESENCE" 2 "HAZARD" ;
+VAL_ 513 ChimeId 0 "NONE" 1 "CHILD_PRESENCE_ALERT" ;

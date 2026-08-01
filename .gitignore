@@ -1,0 +1,34 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.hypothesis/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+
+# Operator configuration. mapping.example.yaml is documentation and IS tracked;
+# a real mapping names internal signals and may point at a token file.
+mapping.yaml
+*.local.yaml
+
+# Secrets. Nothing in this repo should ever need one, but an accidental .env is
+# the classic way credentials reach a remote.
+.env
+*.jwt
+*.pem
+*.key
+
+# Generated topology output. `make gen` recreates build/ from instances/, and
+# the checked-in copy embeds the absolute paths of whichever machine ran it.
+vss-vcar/build/
+
+# Editor / OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
