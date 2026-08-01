@@ -43,7 +43,7 @@ from kuksa_client.grpc.aio import VSSClient
 from remotivelabs.broker import BrokerClient
 from remotivelabs.broker.restbus import RestbusSignalConfig
 
-# ── the rig (bridge/vss-vcar) ────────────────────────────────────────────────
+# ── the rig (bridge/vss-vcar) ────────────────────────────────────────
 BCM_NS = "BCM-VehicleCAN"
 OBSERVE_NS = "topology-VehicleCAN"  # owned by no ECU model
 
@@ -121,18 +121,17 @@ async def check_remotive_to_vss(
 
 
 async def _actuate(kuksa: VSSClient, path: str, value: int) -> None:
-    """Command an actuator the way a real consumer must.
+    """Command an actuator with the call that reports whether anyone heard.
 
-    `set_target_values()` is NOT this. It writes the v1 *Target Value*
-    perspective — a stored field — while `subscribe_target_values()` registers a
-    v2 provider on `OpenProviderStream` and waits for *Actuation* requests. The
-    two never meet: measured on kuksa-client 0.5.2 against a live databroker,
-    `set_target_values` stores a value that `get_target_values` reads back
-    happily, and the registered provider receives nothing at all.
+    `set_target_values()` writes the v1 *Target Value* field; this issues a v2
+    `Actuate` request. Since `1b30420` the bridge subscribes over both protocols
+    at once, so either reaches CAN — but they differ where it matters for a
+    verifier: `Actuate` is never buffered and fails `UNAVAILABLE: Provider ...
+    does not exist` when nothing is listening, while a v1 write succeeds and is
+    stored whether or not a bridge exists.
 
-    v2 has no target-value perspective and v1 has no actuation, so a v2 provider
-    can only be driven by `Actuate`. This is the call CPD and any other consumer
-    must use to command the bridge.
+    A check built on v1 could therefore pass against a stopped bridge. That is
+    why this one uses `Actuate`. See docs/spike-f1-f6-findings.md (F11).
     """
     request = v2.ActuateRequest(
         signal_id=types_v2.SignalID(path=path),
