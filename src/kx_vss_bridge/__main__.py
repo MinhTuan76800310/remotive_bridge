@@ -26,6 +26,7 @@ import argparse
 import asyncio
 import contextlib
 import logging
+import os
 import signal
 import sys
 from pathlib import Path
@@ -34,6 +35,12 @@ from typing import Any, Awaitable, Callable
 import structlog
 from kuksa_client.grpc.aio import VSSClient
 from remotivelabs.broker import BrokerClient
+from structlog.dev import (
+    Column,
+    ConsoleRenderer,
+    KeyValueColumnFormatter,
+    LogLevelColumnFormatter,
+)
 
 from kx_vss_bridge.config import BridgeConfig, ConfigError, load_config
 from kx_vss_bridge.health import serve_health
@@ -68,18 +75,115 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _configure_logging(level: str) -> None:
+_DIM = "\x1b[2m"
+_RESET = "\x1b[0m"
+
+
+def _console_columns() -> list[Column]:
+    """A-lite: colour lives only in the level column.
+
+    ConsoleRenderer's defaults colour cyan keys, magenta values and a bold
+    event name. Measured on one warning line: 23 ANSI escapes, 151 characters
+    of content rendered as 252 — and the yellow level marker then competes
+    with everything around it. Restricting colour to the level keeps the one
+    cue that matters legible.
+    """
+    return [
+        Column(
+            "timestamp",
+            KeyValueColumnFormatter(
+                key_style=None, value_style=_DIM, reset_style=_RESET, value_repr=str
+            ),
+        ),
+        Column(
+            "level",
+            LogLevelColumnFormatter(
+                level_styles=ConsoleRenderer.get_default_level_styles(),
+                reset_style=_RESET,
+            ),
+        ),
+        Column(
+            "event",
+            KeyValueColumnFormatter(
+                key_style=None,
+                value_style="",
+                reset_style="",
+                value_repr=str,
+                width=24,
+            ),
+        ),
+        Column(
+            "",
+            KeyValueColumnFormatter(
+                key_style=_DIM, value_style="", reset_style=_RESET, value_repr=str
+            ),
+        ),
+    ]
+
+
+class _DimFormatter(logging.Formatter):
+    """Dim a third-party stdlib log line, whole.
+
+    `kuksa_client` logs `No Root CA present` and `Establishing insecure
+    channel` through stdlib logging, so they bypass structlog entirely and
+    print raw in the middle of our output. Dimming them here — at the stdlib
+    handler — leaves structlog's own path untouched, which is what keeps this
+    change presentational.
+
+    Installed in console mode only; in JSON mode the handler keeps its
+    original formatter so output stays byte-identical to today's.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        return _DIM + super().format(record) + _RESET
+
+
+def _configure_logging(
+    level: str,
+    *,
+    log_format: str | None = None,
+    is_tty: bool | None = None,
+) -> None:
+    """Configure logging. Presentation only — the processor chain is today's.
+
+    `log_format` and `is_tty` exist for tests; production passes neither and
+    the defaults read KX_LOG_FORMAT and sys.stdout.isatty().
+    """
+    chosen = log_format if log_format is not None else os.environ.get("KX_LOG_FORMAT")
+    if chosen not in (None, "console", "json"):
+        # A typo must not look like it worked.
+        raise ValueError(f"KX_LOG_FORMAT must be 'console' or 'json', got {chosen!r}")
+    if chosen is None:
+        console = sys.stdout.isatty() if is_tty is None else is_tty
+    else:
+        console = chosen == "console"
+
     logging.basicConfig(format="%(message)s", stream=sys.stdout, level=level)
+
+    renderer = (
+        ConsoleRenderer(colors=True, columns=_console_columns())
+        if console
+        else structlog.processors.JSONRenderer()
+    )
+    # Identical to the previous configuration apart from `renderer`: same
+    # processors, same wrapper_class, same default logger factory. Routing
+    # these events through stdlib instead would make the root logger's level
+    # a second gate — measured to silently drop an info event when the root
+    # logger sits at WARNING — which is a behaviour change, not formatting.
     structlog.configure(
         processors=[
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.JSONRenderer(),
+            renderer,
         ],
         wrapper_class=structlog.make_filtering_bound_logger(
             logging.getLevelName(level)
         ),
     )
+
+    if console:
+        for handler in logging.getLogger().handlers:
+            handler.setFormatter(_DimFormatter("%(message)s"))
 
 
 def _token(config: BridgeConfig) -> str | None:

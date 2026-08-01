@@ -8,10 +8,19 @@ the process down — a peer outage is a degraded state, not a reason to exit.
 from __future__ import annotations
 
 import asyncio
+import io
+import json
+import logging
+import re
+import sys
 
 import pytest
+import structlog
 
-from kx_vss_bridge.__main__ import build_parser, run
+from kx_vss_bridge.__main__ import _configure_logging, build_parser, run
+
+_DIM_ESC = "\x1b[2m"
+_RESET_ESC = "\x1b[0m"
 
 VALID = """
 remotive: {url: http://broker:50051}
@@ -168,3 +177,131 @@ async def test_cancellation_shuts_everything_down(tmp_path):
         await task
 
     assert stopped == {"to_vss", "to_can", "health"}
+
+
+# ── console logging ──────────────────────────────────────────────────────────
+
+
+def _emit(log_format, is_tty, emit):
+    """Configure logging, capture one emission, always restore global state.
+
+    Two traps, both hit while validating this plan:
+
+    * **pytest installs its own root handlers** (`_LiveLoggingNullHandler`,
+      `_FileHandler`), and `logging.basicConfig()` is a no-op when the root
+      logger already has handlers. Without clearing them first,
+      `_configure_logging` installs nothing, the third-party line goes to
+      pytest's capture instead of the buffer, and the dimming tests fail
+      against an empty string. Clearing and restoring is what makes the test
+      exercise the production path.
+    * structlog's default PrintLogger writes to `sys.stdout`, while the stdlib
+      handler writes to its own stream — so both are redirected.
+    """
+    buf = io.StringIO()
+    root = logging.getLogger()
+    saved_handlers = root.handlers[:]
+    saved_level = root.level
+    saved_stdout = sys.stdout
+    saved_config = structlog.get_config()
+    root.handlers = []
+    try:
+        _configure_logging("INFO", log_format=log_format, is_tty=is_tty)
+        for handler in root.handlers:
+            if hasattr(handler, "stream"):
+                handler.stream = buf
+        sys.stdout = buf
+        structlog.configure(logger_factory=structlog.PrintLoggerFactory(buf))
+        emit()
+    finally:
+        sys.stdout = saved_stdout
+        root.handlers = saved_handlers
+        root.setLevel(saved_level)
+        structlog.configure(**saved_config)
+    return buf.getvalue()
+
+
+def _bridge_event():
+    structlog.get_logger("kx").warning(
+        "mapping warning", direction="to_can", frame="VC_To_HMI"
+    )
+
+
+def _third_party_event():
+    logging.getLogger("kuksa_client.grpc").info("No Root CA present")
+
+
+def test_unset_format_without_a_tty_gives_json():
+    parsed = json.loads(_emit(None, False, _bridge_event))
+    assert parsed["event"] == "mapping warning"
+    assert parsed["direction"] == "to_can"
+
+
+def test_unset_format_with_a_tty_gives_console():
+    line = _emit(None, True, _bridge_event)
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(line)
+    assert "mapping warning" in line
+
+
+def test_explicit_console_overrides_a_missing_tty():
+    line = _emit("console", False, _bridge_event)
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(line)
+
+
+def test_explicit_json_overrides_a_present_tty():
+    json.loads(_emit("json", True, _bridge_event))  # must not raise
+
+
+def test_an_unrecognised_format_refuses_to_start():
+    with pytest.raises(ValueError, match="KX_LOG_FORMAT"):
+        _configure_logging("INFO", log_format="colour", is_tty=False)
+
+
+def test_console_colour_appears_only_in_the_level_column():
+    line = _emit("console", True, _bridge_event)
+    match = re.search(r"\x1b\[3[0-7]m", line)
+    assert match, "expected a colour escape in the level column"
+    tail = line[match.end():]
+    stray = [
+        esc
+        for esc in re.findall(r"\x1b\[[0-9;]*m", tail)
+        if esc not in (_DIM_ESC, _RESET_ESC)
+    ]
+    assert stray == [], f"colour leaked outside the level column: {stray}"
+
+
+def test_third_party_lines_are_dimmed_in_console_mode():
+    line = _emit("console", True, _third_party_event)
+    assert line.startswith(_DIM_ESC)
+    assert line.rstrip("\n").endswith(_RESET_ESC)
+
+
+def test_third_party_lines_are_untouched_in_json_mode():
+    """No escape, and the message is exactly what kuksa_client emitted —
+    JSON mode must be byte-identical to today, third-party lines included."""
+    out = _emit("json", False, _third_party_event)
+    assert "\x1b" not in out
+    assert out.strip() == "No Root CA present"
+
+
+def test_json_mode_output_shape_is_unchanged():
+    """The original bug report's line shape: kwargs first, in insertion order,
+    then event, level, timestamp. A renderer swap must not reorder or rename
+    anything, or every existing log consumer breaks.
+    """
+    line = _emit(
+        None,
+        False,
+        lambda: structlog.get_logger("kx").info(
+            "starting", remotive="http://127.0.0.1:50106", to_vss=4, to_can=2
+        ),
+    )
+    assert list(json.loads(line)) == [
+        "remotive",
+        "to_vss",
+        "to_can",
+        "event",
+        "level",
+        "timestamp",
+    ]
