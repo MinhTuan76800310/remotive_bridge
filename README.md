@@ -7,16 +7,16 @@ publishes no signal of its own.
 ```
 ┌─ vCar (RemotiveLabs) ────────┐
 │  ECUs ──── topology-broker   │
-└───────────────┬──────────────┘
+└──────────────┬──────────────┘
                 │ gRPC 50051
          ┌──────┴───────┐
          │  vss-bridge  │ ←── mapping.yaml
          └──────┬───────┘
                 │ gRPC 55555
-┌───────────────┴──────────────┐
+┌──────────────┴──────────────┐
 │  KUKSA databroker            │
 │  VSS 6.0 + overlays          │
-└───────────────┬──────────────┘
+└──────────────┬──────────────┘
                 │
      cpd-core, dashboards, …
 ```
@@ -343,11 +343,19 @@ remotive broker restbus reset --url http://127.0.0.1:50051 --namespace BCM-Vehic
 ### Why `scripts/actuate.py` and not databroker-cli
 
 `databroker-cli`'s `actuate`, and `kuksa-client`'s `set_target_values()`, both
-write the **v1 Target Value** field. The bridge registers as a **v2 provider** and
-waits for *Actuation* requests. v1 has no actuation, v2 has no target value, so
-the write succeeds, reads back fine, and the provider never hears about it — no
-error anywhere. Measured on kuksa-client 0.5.2; see
-[`docs/spike-f1-f6-findings.md`](docs/spike-f1-f6-findings.md) (F11).
+write the **v1 Target Value** field rather than issuing a v2 *Actuation* request.
+Both now work — the bridge subscribes over v1 and v2 at once (F11) — but only
+`Actuate` gives you a straight answer about whether a provider was listening:
+
+| | v1 `set_target_values` | v2 `Actuate` |
+|---|---|---|
+| bridge running | value reaches CAN | value reaches CAN |
+| bridge **not** running | succeeds anyway, `get_target_values` reads it back, nothing happens | fails `UNAVAILABLE: Provider ... does not exist` |
+
+Actuation is never buffered: it reaches a live provider or it is refused. A v1
+write is stored either way, so a silent success tells you nothing. That is why
+this script exists and why `scripts/verify_bridge.py` uses the same call —
+see [`docs/spike-f1-f6-findings.md`](docs/spike-f1-f6-findings.md) (F11).
 
 `scripts/actuate.py` issues the v2 `Actuate` call, and reads the path's declared
 type first so `uint16` vs `int32` cannot bite you.
@@ -430,6 +438,13 @@ async with BrokerClient(url="http://127.0.0.1:50051") as c:
     for f in await c.list_frame_infos("BCM-VehicleCAN"):
         print(f.name, f.cycle_time_millis, list(f.signals))
 ```
+
+**Pass the namespaces.** `list_frame_infos()` with no arguments returns an EMPTY
+list, not everything — measured on remotivelabs-broker 0.9.1 against a broker
+holding 2 frames. It answers instantly and without error, so a caller that trusts
+it sees a vehicle with no signals and concludes the topology is still building.
+Enumerate with `list_namespaces()` first, or just run
+`./scripts/discover_mapping.py`, which does it for you.
 
 ### Reference
 
@@ -556,7 +571,7 @@ and both gRPC connections are closed.
 
 ```bash
 uv sync --dev
-uv run pytest -q          # 231 tests, no vCar or databroker needed
+uv run pytest -q          # 237 tests, no vCar or databroker needed
 ```
 
 The suite uses fake peers throughout. Both loops and validation were additionally
@@ -575,6 +590,9 @@ src/kx_vss_bridge/
   health.py           /health + /stats
 scripts/
   spike_restbus.py    the F1/F6 experiment, re-runnable
+  discover_mapping.py print a mapping skeleton from the live vehicle
+  actuate.py          command one actuator over v2 Actuate
+  verify_bridge.py    prove both directions of a running bridge
 ```
 
 Design: [`../docs/superpowers/specs/2026-08-01-vss-remotive-bridge-design.md`](../docs/superpowers/specs/2026-08-01-vss-remotive-bridge-design.md)
