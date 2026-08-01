@@ -11,6 +11,7 @@ import asyncio
 import io
 import json
 import logging
+import os
 import re
 import sys
 
@@ -182,10 +183,10 @@ async def test_cancellation_shuts_everything_down(tmp_path):
 # ── console logging ──────────────────────────────────────────────────────────
 
 
-def _emit(log_format, is_tty, emit):
+def _emit(log_format, is_tty, emit, *, root_level=None):
     """Configure logging, capture one emission, always restore global state.
 
-    Two traps, both hit while validating this plan:
+    Traps, all four hit while validating this task:
 
     * **pytest installs its own root handlers** (`_LiveLoggingNullHandler`,
       `_FileHandler`), and `logging.basicConfig()` is a no-op when the root
@@ -195,7 +196,18 @@ def _emit(log_format, is_tty, emit):
       against an empty string. Clearing and restoring is what makes the test
       exercise the production path.
     * structlog's default PrintLogger writes to `sys.stdout`, while the stdlib
-      handler writes to its own stream — so both are redirected.
+      handler writes to its own stream — so both are redirected. Patching
+      `sys.stdout` is *sufficient* for the default factory: `PrintLogger.msg`
+      passes `file=None` to `print` when its file is `stdout`, so the stream is
+      resolved at call time. This helper therefore must **not** install a
+      `logger_factory` of its own — doing so overwrote the factory the
+      implementation chose and blinded every test below to the one design the
+      task exists to forbid (see `_assert_not_routed_through_stdlib`).
+    * `KX_LOG_FORMAT` is read from the real environment when `log_format` is
+      None, so the ambient value is cleared — otherwise anyone with that
+      variable exported gets a red suite for a reason unrelated to the tests.
+    * The stdlib root level is left alone unless `root_level` asks for it, and
+      it is restored either way.
     """
     buf = io.StringIO()
     root = logging.getLogger()
@@ -203,21 +215,47 @@ def _emit(log_format, is_tty, emit):
     saved_level = root.level
     saved_stdout = sys.stdout
     saved_config = structlog.get_config()
+    saved_env = os.environ.pop("KX_LOG_FORMAT", None)
     root.handlers = []
     try:
         _configure_logging("INFO", log_format=log_format, is_tty=is_tty)
+        _assert_not_routed_through_stdlib()
         for handler in root.handlers:
             if hasattr(handler, "stream"):
                 handler.stream = buf
         sys.stdout = buf
-        structlog.configure(logger_factory=structlog.PrintLoggerFactory(buf))
+        if root_level is not None:
+            root.setLevel(root_level)
         emit()
     finally:
         sys.stdout = saved_stdout
         root.handlers = saved_handlers
         root.setLevel(saved_level)
         structlog.configure(**saved_config)
+        if saved_env is not None:
+            os.environ["KX_LOG_FORMAT"] = saved_env
     return buf.getvalue()
+
+
+def _assert_not_routed_through_stdlib():
+    """The crux constraint of this task, checked on every `_emit` call.
+
+    Routing the bridge's own events through `structlog.stdlib.LoggerFactory`
+    makes the root stdlib logger a *second level gate*: with the root logger at
+    WARNING and structlog's wrapper_class at INFO, an info event is silently
+    dropped. That is a behaviour change, not formatting, so the renderer work
+    must never introduce it.
+
+    Asserted here rather than in one test so that every case below carries the
+    guard, and paired with
+    `test_an_info_event_survives_a_root_logger_at_warning`, which exercises the
+    failure mode itself rather than its structural cause.
+    """
+    factory = structlog.get_config()["logger_factory"]
+    assert not isinstance(factory, structlog.stdlib.LoggerFactory), (
+        "_configure_logging installed structlog.stdlib.LoggerFactory; that makes "
+        "the root logger a second level gate and silently drops events"
+    )
 
 
 def _bridge_event():
@@ -256,6 +294,26 @@ def test_explicit_json_overrides_a_present_tty():
 def test_an_unrecognised_format_refuses_to_start():
     with pytest.raises(ValueError, match="KX_LOG_FORMAT"):
         _configure_logging("INFO", log_format="colour", is_tty=False)
+
+
+@pytest.mark.parametrize("log_format, is_tty", [("json", False), ("console", True)])
+def test_an_info_event_survives_a_root_logger_at_warning(log_format, is_tty):
+    """The failure mode that got the stdlib-routing design rejected.
+
+    `_configure_logging` sets structlog's wrapper_class to INFO, so an info
+    event must be emitted no matter what level the *stdlib* root logger sits
+    at. Routing structlog through `structlog.stdlib.LoggerFactory` breaks
+    exactly this: the root logger becomes a second gate and the event vanishes
+    with no error anywhere. Verified to fail against that design, in both
+    renderer modes.
+    """
+    out = _emit(
+        log_format,
+        is_tty,
+        lambda: structlog.get_logger("kx").info("info survives", n=1),
+        root_level=logging.WARNING,
+    )
+    assert "info survives" in out
 
 
 def test_console_colour_appears_only_in_the_level_column():
