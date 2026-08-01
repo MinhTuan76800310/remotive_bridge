@@ -569,6 +569,53 @@ workers joined by a bounded latest-value buffer, so:
 Shutdown is graceful on SIGTERM and SIGINT: tasks are cancelled, the health socket
 and both gRPC connections are closed.
 
+### Logs
+
+One line per event. The renderer follows `sys.stdout.isatty()`, so a terminal gets
+the readable console format and everything else — a pipe, a CI runner,
+`docker logs` — keeps the JSON that has always been emitted, byte for byte.
+
+| `KX_LOG_FORMAT` | Renderer |
+|---|---|
+| unset | console on a TTY, JSON otherwise |
+| `console` | console, always |
+| `json` | one JSON object per line, always |
+
+Any other value — **including the empty string** — is a startup error. There is no
+silent fallback, because a typo that quietly kept the old format would look like
+it had worked.
+
+Console mode colours **only the level column** (green info · yellow warning · red
+error). Keys are dimmed and values are plain, so the one cue that matters is not
+competing with a coloured line around it. `kuksa_client` logs `No Root CA present`
+and `Establishing insecure channel` through stdlib logging, bypassing the bridge's
+own path entirely; console mode dims those lines whole, so they recede without
+being hidden. JSON mode leaves them exactly as they were.
+
+A healthy start now says so — `remotive connected`, `kuksa connected` and
+`mapping validated` on each direction, plus `restbus started` per namespace the
+`to_can` side adds:
+
+```
+2026-08-01T22:09:24.075580Z [info     ] remotive connected       direction=to_vss url=http://topology-broker.com:50051
+2026-08-01T22:09:24.075636Z [info     ] kuksa connected          direction=to_vss endpoint=kuksa-databroker:55557
+2026-08-01T22:09:24.075665Z [info     ] mapping validated        active=4 direction=to_vss dropped=0 warned=0
+2026-08-01T22:09:24.075701Z [info     ] restbus started          direction=to_can frames=1 namespace=BCM-VehicleCAN
+```
+
+`KX_LOG_FORMAT=console` emits ANSI escapes wherever it is set, a file and a pipe
+included — that is what an explicit override is for. Use `json` if the sink cannot
+take them.
+
+```bash
+KX_LOG_FORMAT=console .venv/bin/kx-vss-bridge --config mapping.example.yaml
+```
+
+A container's stdout is not a TTY, so pass the variable into it to get colour —
+`docker run -e KX_LOG_FORMAT=console …`. `run_remotive_vss_bridge.sh` forwards no
+environment of its own, so setting it in the calling shell will not reach the
+bridge.
+
 ---
 
 ## Development
