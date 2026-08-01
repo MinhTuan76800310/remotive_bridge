@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+import structlog
 from kuksa_client.grpc import Datapoint, Field, View, VSSClientError
 
 from kx_vss_bridge.config import load_config_text
@@ -457,6 +458,37 @@ async def test_every_frame_is_added_in_exactly_one_call():
     assert start is True
     added = {(ns, cfg.name) for ns, configs in frames for cfg in configs}
     assert added == {(NS, STATE), (other_ns, HMI)}
+
+
+async def test_restbus_writer_logs_connect_and_restbus_started():
+    broker = _broker()
+    with structlog.testing.capture_logs() as captured:
+        await _run_briefly(
+            run_remotive_restbus_writer(
+                _config(), BridgeState(), broker_factory=lambda: broker,
+                kuksa_factory=lambda: FakeVSSClient(KUKSA_PATHS), sleep=RecordingSleep(1),
+            )
+        )
+    events = [entry["event"] for entry in captured]
+    assert "remotive connected" in events
+    assert "kuksa connected" in events
+    assert "mapping validated" in events
+    assert "restbus started" in events
+
+
+async def test_target_reader_logs_kuksa_connected_but_not_remotive():
+    """This worker owns no broker connection, so it must not claim one."""
+    kuksa = FakeVSSClient(KUKSA_PATHS)
+    with structlog.testing.capture_logs() as captured:
+        await _run_briefly(
+            run_kuksa_target_reader(
+                _config(), BridgeState(), kuksa_factory=lambda: kuksa,
+                sleep=RecordingSleep(1),
+            )
+        )
+    events = [entry["event"] for entry in captured]
+    assert "kuksa connected" in events
+    assert "remotive connected" not in events
 
 
 async def test_added_frames_carry_the_real_cycle_time():

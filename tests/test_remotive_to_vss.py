@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+import structlog
 
 from kx_vss_bridge.config import load_config_text
 from kx_vss_bridge.remotive_to_vss import (
@@ -121,6 +122,35 @@ async def test_reader_seeds_then_streams():
         )
     )
     assert [c["on_change"] for c in broker.subscribe_calls][:2] == [False, True]
+
+
+async def test_reader_logs_connect_and_validation_events():
+    """A successful connect must say so; silence reads as a hang."""
+    broker = _broker(hang_after_batches=True)
+    with structlog.testing.capture_logs() as captured:
+        await _run_briefly(
+            run_remotive_reader(
+                _config(), BridgeState(), broker_factory=lambda: broker,
+                kuksa_factory=lambda: FakeVSSClient(KUKSA_PATHS), sleep=RecordingSleep(1),
+            )
+        )
+    events = [entry["event"] for entry in captured]
+    assert "remotive connected" in events
+    assert "kuksa connected" in events
+    assert "mapping validated" in events
+
+
+async def test_connect_events_carry_the_direction():
+    broker = _broker(hang_after_batches=True)
+    with structlog.testing.capture_logs() as captured:
+        await _run_briefly(
+            run_remotive_reader(
+                _config(), BridgeState(), broker_factory=lambda: broker,
+                kuksa_factory=lambda: FakeVSSClient(KUKSA_PATHS), sleep=RecordingSleep(1),
+            )
+        )
+    connected = [e for e in captured if e["event"] == "remotive connected"]
+    assert connected and all(e["direction"] == "to_vss" for e in connected)
 
 
 async def test_reader_subscribes_to_every_active_signal_in_one_call():

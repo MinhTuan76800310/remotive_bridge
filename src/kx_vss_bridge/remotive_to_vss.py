@@ -84,10 +84,25 @@ async def run_remotive_reader(
     while True:
         try:
             async with broker_factory() as broker:
+                log.info("remotive connected", direction="to_vss", url=config.remotive.url)
+
                 # Re-validate per connection: a rebuilt vehicle can have
                 # different signals, and cached results would quietly lie.
                 async with kuksa_factory() as kuksa:
+                    log.info(
+                        "kuksa connected",
+                        direction="to_vss",
+                        endpoint=f"{config.kuksa.host}:{config.kuksa.port}",
+                    )
                     validated = await validate_mapping(config, broker, kuksa)
+
+                log.info(
+                    "mapping validated",
+                    direction="to_vss",
+                    active=validated.active_to_vss,
+                    dropped=len(validated.skipped),
+                    warned=len(validated.warnings),
+                )
 
                 await state.replace_validation(
                     skipped=validated.skipped,

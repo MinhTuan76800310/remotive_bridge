@@ -222,6 +222,11 @@ async def run_kuksa_target_reader(
     while True:
         try:
             async with kuksa_factory() as kuksa:
+                log.info(
+                    "kuksa connected",
+                    direction="to_can",
+                    endpoint=f"{config.kuksa.host}:{config.kuksa.port}",
+                )
                 await state.set_peer(Peer.KUKSA, connected=True, phase="reading targets")
 
                 # Seed first: the v2 subscription reports changes only, so a
@@ -265,8 +270,23 @@ async def run_remotive_restbus_writer(
     while True:
         try:
             async with broker_factory() as broker:
+                log.info("remotive connected", direction="to_can", url=config.remotive.url)
+
                 async with kuksa_factory() as kuksa:
+                    log.info(
+                        "kuksa connected",
+                        direction="to_can",
+                        endpoint=f"{config.kuksa.host}:{config.kuksa.port}",
+                    )
                     validated = await validate_mapping(config, broker, kuksa)
+
+                log.info(
+                    "mapping validated",
+                    direction="to_can",
+                    active=validated.active_to_can,
+                    dropped=len(validated.skipped),
+                    warned=len(validated.warnings),
+                )
 
                 if not validated.to_can:
                     log.warning("no to_can mappings survived validation; idling")
@@ -285,6 +305,13 @@ async def run_remotive_restbus_writer(
                 if add_args:
                     await broker.restbus.add(*add_args, start=True)
                     started_namespaces.update(ns for ns, _ in add_args)
+                    for namespace, frames in validated.restbus_frames.items():
+                        log.info(
+                            "restbus started",
+                            direction="to_can",
+                            namespace=namespace,
+                            frames=len(frames),
+                        )
 
                 await state.set_peer(Peer.REMOTIVE, connected=True, phase="writing restbus")
                 index = {m.vss: m for m in validated.to_can}
