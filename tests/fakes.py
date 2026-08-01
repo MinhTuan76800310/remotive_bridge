@@ -75,6 +75,7 @@ class FakeRestbus:
     add_calls: list[tuple[tuple[Any, ...], bool]] = field(default_factory=list)
     update_calls: list[tuple[Any, ...]] = field(default_factory=list)
     configured: set[tuple[str, str]] = field(default_factory=set)
+    closed: set[str] = field(default_factory=set)
     fail_add_with: Exception | None = None
     fail_update_with: Exception | None = None
 
@@ -85,6 +86,13 @@ class FakeRestbus:
         for namespace, configs in frames:
             for config in configs:
                 self.configured.add((namespace, config.name))
+
+    async def close(self, *namespaces: str) -> None:
+        """Stop transmitting and drop configuration for these namespaces."""
+        self.closed.update(namespaces)
+        self.configured = {
+            entry for entry in self.configured if entry[0] not in namespaces
+        }
 
     async def update_signals(self, *signals: Any) -> None:
         if self.fail_update_with is not None:

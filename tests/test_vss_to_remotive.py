@@ -520,6 +520,97 @@ async def test_writer_cancellation_propagates():
         await task
 
 
+async def test_shutdown_stops_the_frames_it_started():
+    """The bridge must not keep transmitting after it exits.
+
+    Measured on the live rig: `add(start=True)` makes the *broker* transmit the
+    frame cyclically, and that outlives the client. A bridge that adds a frame to
+    an otherwise-silent bus and then dies leaves 10 Hz of traffic behind carrying
+    its last value — indistinguishable, to anyone downstream, from an ECU that is
+    still running. A bridge is a conduit; when it stops, its effect stops.
+    """
+    broker = _broker()
+    state = BridgeState()
+    await state.put_latest(Direction.TO_CAN, HORN_PATH, 1)
+
+    task = asyncio.create_task(
+        run_remotive_restbus_writer(
+            _config(), state, broker_factory=lambda: broker,
+            kuksa_factory=lambda: FakeVSSClient(KUKSA_PATHS), sleep=RecordingSleep(),
+        )
+    )
+    await asyncio.sleep(0.2)
+    assert broker.restbus.add_calls  # it did start transmitting
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert broker.restbus.closed == {NS}
+
+
+async def test_shutdown_closes_every_namespace_it_added_to():
+    other_ns = "VC-VehicleCAN"
+    text = CONFIG.replace(
+        f"""  - vss: {TELLTALE_PATH}
+    can: {{namespace: {NS}, signal: {TELLTALE}}}
+    type: int""",
+        f"""  - vss: {TELLTALE_PATH}
+    can: {{namespace: {other_ns}, signal: {TELLTALE}}}
+    type: int""",
+    )
+    broker = FakeBrokerClient(
+        frame_infos={
+            NS: [make_frame_info(STATE, NS, [HORN, HAZARD])],
+            other_ns: [make_frame_info(HMI, other_ns, [TELLTALE])],
+        }
+    )
+    state = BridgeState()
+    await state.put_latest(Direction.TO_CAN, HORN_PATH, 1)
+
+    task = asyncio.create_task(
+        run_remotive_restbus_writer(
+            _config(text), state, broker_factory=lambda: broker,
+            kuksa_factory=lambda: FakeVSSClient(KUKSA_PATHS), sleep=RecordingSleep(),
+        )
+    )
+    await asyncio.sleep(0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert broker.restbus.closed == {NS, other_ns}
+
+
+async def test_nothing_is_closed_when_nothing_was_added():
+    """allow_add: false means the frame was someone else's. Leave it alone."""
+    text = CONFIG.replace("    type: boolean", "    type: boolean\n    allow_add: false")
+    text = text.replace(
+        f"    can: {{namespace: {NS}, signal: {TELLTALE}}}\n    type: int",
+        f"    can: {{namespace: {NS}, signal: {TELLTALE}}}\n    type: int\n    allow_add: false",
+    )
+    config = _config(text)
+    assert not any(m.allow_add for m in config.to_can)  # the premise
+
+    broker = _broker()
+    state = BridgeState()
+    await state.put_latest(Direction.TO_CAN, HORN_PATH, 1)
+
+    task = asyncio.create_task(
+        run_remotive_restbus_writer(
+            config, state, broker_factory=lambda: broker,
+            kuksa_factory=lambda: FakeVSSClient(KUKSA_PATHS), sleep=RecordingSleep(),
+        )
+    )
+    await asyncio.sleep(0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert broker.restbus.add_calls == []
+    assert broker.restbus.closed == set()
+
+
 # ── the seam ─────────────────────────────────────────────────────────────────
 
 

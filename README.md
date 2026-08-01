@@ -137,6 +137,11 @@ but then expect `VC_To_HMI` to alternate.
 transmitted cyclically by the *broker* even after the client that configured it
 has gone. Deleting the `vc` container does not stop `VC_To_HMI`.
 
+The bridge cleans up after itself on SIGTERM/SIGINT — it closes the restbus on
+every namespace it added to, so a bus that was silent before it started is
+silent again after it stops. Verified: 0 frames → 44 while running → 0 after
+shutdown. A `kill -9` skips that, and leaves the frame cycling.
+
 ```bash
 remotive broker restbus reset --url http://127.0.0.1:50051 --namespace BCM-VehicleCAN
 remotive broker restbus reset --url http://127.0.0.1:50051 --namespace VC-VehicleCAN

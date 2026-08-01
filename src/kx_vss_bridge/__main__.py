@@ -206,18 +206,33 @@ async def _run_until_signalled(config_path: Path) -> None:
     worker = asyncio.create_task(run(config_path), name="bridge")
     stopped = asyncio.create_task(stop.wait(), name="signal")
 
-    done, pending = await asyncio.wait(
-        {worker, stopped}, return_when=asyncio.FIRST_COMPLETED
-    )
-    for task in pending:
-        task.cancel()
-    if worker in done:
-        # run() never returns normally, so this is an error or SystemExit.
-        await worker
-    else:
+    try:
+        done, pending = await asyncio.wait(
+            {worker, stopped}, return_when=asyncio.FIRST_COMPLETED
+        )
+
+        if worker in done:
+            # run() never returns normally, so this is an error or SystemExit.
+            await worker
+            return
+
         log.info("signal received; shutting down")
+        worker.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await worker
+    finally:
+        # Cancelling is not enough: a cancelled task stays pending until it is
+        # awaited, and the event loop will not close while it is. Missing this
+        # left the process alive after a clean shutdown — SIGTERM logged, restbus
+        # stopped, and then nothing.
+        stopped.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await stopped
+        # Remove the handlers so a second signal reaches the default disposition
+        # rather than setting an Event nobody is waiting on.
+        for signame in ("SIGTERM", "SIGINT"):
+            with contextlib.suppress(NotImplementedError, AttributeError, ValueError):
+                loop.remove_signal_handler(getattr(signal, signame))
 
 
 def main() -> None:

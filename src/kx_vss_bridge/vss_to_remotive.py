@@ -133,6 +133,9 @@ async def run_remotive_restbus_writer(
 ) -> None:
     """Flush the hand-off buffer into the Remotive restbus. Never returns."""
     retry_delay = config.options.retry_delay
+    # Namespaces this bridge has told a broker to start transmitting. Tracked so
+    # shutdown can undo exactly what it did, and nothing else.
+    started_namespaces: set[str] = set()
 
     while True:
         try:
@@ -145,14 +148,18 @@ async def run_remotive_restbus_writer(
                     await sleep(retry_delay)
                     continue
 
-                # One call, every frame, once per connection. Restbus state dies
-                # with the connection, so this repeats on every reconnect.
+                # One call, every frame, once per connection. `add(start=True)`
+                # makes the BROKER transmit these frames cyclically, and that
+                # outlives this client — measured on the live rig, a frame added
+                # here kept cycling at 10 Hz after the bridge process was killed.
+                # Hence `started_namespaces` and the cleanup in `finally`.
                 add_args = tuple(
                     (namespace, list(frames.values()))
                     for namespace, frames in validated.restbus_frames.items()
                 )
                 if add_args:
                     await broker.restbus.add(*add_args, start=True)
+                    started_namespaces.update(ns for ns, _ in add_args)
 
                 await state.set_peer(Peer.REMOTIVE, connected=True, phase="writing restbus")
                 index = {m.vss: m for m in validated.to_can}
@@ -182,6 +189,23 @@ async def run_remotive_restbus_writer(
                     await state.acknowledge(Direction.TO_CAN, version)
 
         except asyncio.CancelledError:
+            # Shutting down. Stop the frames this bridge started, so its effect
+            # on the bus ends when it does. Best-effort: the broker may already
+            # be gone, and failing to clean up must not mask the cancellation.
+            if started_namespaces:
+                try:
+                    async with broker_factory() as broker:
+                        await broker.restbus.close(*sorted(started_namespaces))
+                    log.info(
+                        "stopped restbus frames on shutdown",
+                        namespaces=sorted(started_namespaces),
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "could not stop restbus frames; they may keep cycling",
+                        namespaces=sorted(started_namespaces),
+                        error=str(exc),
+                    )
             raise
         except Exception as exc:
             log.warning("remotive restbus writer error", error=str(exc))
