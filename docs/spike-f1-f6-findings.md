@@ -137,12 +137,21 @@ failure in every mode, including standalone, on tags 1.20 through 1.24.
 
 ---
 
-# Addendum — F11: `set_target_values` does not drive a v2 provider
+# Addendum — F11: a v1 target write does not reach a v2 provider
 
-Date: 2026-08-01. Found while building `scripts/verify_bridge.py`, which failed
-against a bridge that was in fact working correctly.
+Date: 2026-08-01, **corrected 2026-08-02**. Found while building
+`scripts/verify_bridge.py`, which failed against a bridge that was — on the
+evidence available that day — working correctly.
 
-## What happens
+> **The first version of this addendum drew the wrong conclusion from a correct
+> measurement.** It said the two protocols "never meet" and that the bridge
+> therefore needed no change. The observation holds; the inference does not.
+> A v1 target write is perfectly receivable — over v1. The bridge was listening
+> on one protocol and had to listen on both. Fixed in `1b30420`; the reasoning
+> is below and in
+> [issue #1](https://github.com/MinhTuan76800310/remotive_bridge/issues/1).
+
+## What was measured
 
 `kuksa-client` 0.5.2 exposes two calls whose names imply they are two ends of one
 channel. They are not:
@@ -152,8 +161,7 @@ channel. They are not:
 | `set_target_values()` | v1 `Set` / `ACTUATOR_TARGET` | stores a value in the *Target Value* field |
 | `subscribe_target_values()` | v2 `OpenProviderStream` | registers a **provider** and waits for *Actuation* requests |
 
-v2 has no target-value perspective and v1 has no actuation, so the two never
-meet. Measured against the live databroker, on a path with a registered provider:
+Measured against the live databroker, on a path with a registered provider:
 
 ```
 set_target_values(True)        -> returns success
@@ -169,20 +177,96 @@ provider deliveries            -> [{'Vehicle.Body.Lights.Hazard.IsSignaling': Tr
 ```
 
 Confirmed on `Vehicle.Body.Lights.Hazard.IsSignaling`, a path no ECU provides, so
-`ALREADY_EXISTS` could not confound the result.
+`ALREADY_EXISTS` could not confound the result. **Every number above is still
+accurate.** What follows replaces the explanation and the conclusion.
 
-## Consequences
+## Why it happens — corrected
 
-**The bridge is correct and needs no change.** `subscribe_target_values()` is the
-right way for a provider to receive commands; the KUKSA docs describe Target Value
-as deprecated and v2 as actuation-only.
+The two are separate *perspectives* on the same actuator, and each is reachable;
+they simply are not the same stream. A v1 target write reaches a **v1 target
+subscriber** — `subscribe(entries=[SubscribeEntry(path, View.TARGET_VALUE,
+(Field.ACTUATOR_TARGET,))])` — and is invisible to a v2 provider. That is the
+whole of it. "Never meet" overstated a real gap into an impossibility.
 
-**Consumers must use `Actuate`, not `set_target_values`.** Anything commanding the
-bridge — CPD, a dashboard, a test — has to issue a v2 `ActuateRequest`. A v1 target
-write is silently ignored: it succeeds, it reads back, and nothing happens. There
-is no error to catch, which makes it the same class of trap as F10.
+Measured directly, 2026-08-02, against `cpd-standalone-databroker` 0.7.1-dev.0
+with both subscribers attached to one path at the same time and a single v1
+write between them:
 
-Two details that cost time:
+```
+v1 set_target_values(True)   -> ok
+get_target_values            -> True
+v1 target subscriber saw     -> [False, True]      ← replay, then our write
+v2 provider stream saw       -> []                 ← nothing
+```
+
+One subscriber received it. The other did not.
+
+The leading `False` is not noise: a v1 target subscription **replays the stored
+target at subscribe time**. Isolated — target pre-set, then subscribe, then no
+write at all:
+
+```
+pre-set target = True, then subscribe; no further writes
+v1 replayed on subscribe     -> [True]
+v2 replayed on subscribe     -> []
+```
+
+So the `get_target_values()` seed in `run_kuksa_target_reader` is redundant for
+the v1 path and load-bearing for v2, which reports changes only. It stays: it is
+cheap, and it is the only thing covering v2 if the v1 branch is dormant.
+
+`kuksa-client` 0.5.2 even knows about the gap. `subscribe_target_values` catches
+`UNIMPLEMENTED` and falls back to exactly that v1 subscription
+(`kuksa_client/grpc/aio.py`, `subscribe_target_values`):
+
+```python
+try:
+    async for updates in self.v2_subscribe_actuation_requests(paths=paths, ...):
+        yield {...}
+except VSSClientError as exc:
+    if exc.error["code"] != grpc.StatusCode.UNIMPLEMENTED.value[0]:
+        raise
+    # v2 not available - falling back to v1 subscribe target values
+    async for updates in self.subscribe(
+        entries=(SubscribeEntry(p, View.TARGET_VALUE, (Field.ACTUATOR_TARGET,))
+                 for p in paths), ...):
+        yield {...}
+```
+
+Three verified facts explain why that safety net never caught anything:
+
+1. **`cpd-core` 1.0.0 pins `kuksa-client==0.4.3`**, a wheel with no v2 code at
+   all. Its `set_target_values` is unconditionally a v1 `Set`.
+2. **The CPD databroker is `0.7.1-dev.0` and does serve**
+   `/kuksa.val.v2.VAL/OpenProviderStream` — read out of the image's binary.
+3. Therefore the databroker never answers `UNIMPLEMENTED`, the `except` branch
+   never runs, and 0.5.2 stays on v2 for the life of the process.
+
+Serving v2 is precisely what disables the fallback. An *older* databroker, one
+without v2, would have worked by accident.
+
+## Consequences — corrected
+
+**The bridge reads both protocols at once.** `run_kuksa_target_reader` runs a v2
+`OpenProviderStream` drain and a v1 `View.TARGET_VALUE` drain into the same
+buffer, each supervised independently so that a protocol this databroker does not
+serve cannot take the working one down. See `_subscribe_both_protocols` in
+`src/kx_vss_bridge/vss_to_remotive.py`.
+
+The reason is not that v1 deserves support. It is that a bridge has no standing
+to insist on a protocol: whichever one a writer speaks is the writer's business,
+and choosing a side only relocates the bug — v2-only misses cpd-core, v1-only
+misses any newer provider actuating over v2.
+
+**Unsupported is not the same as broken.** `UNIMPLEMENTED` means this databroker
+has no such service: ordinary, logged at `info`, that branch goes dormant.
+Anything else — `ALREADY_EXISTS` when another provider owns the actuator (F4), a
+permission denial, a transport failure — is recorded on the peer and surfaces in
+`/stats` as `last_error`.
+
+**Consumers may use either.** `Actuate` remains the forward-looking call and is
+what `scripts/actuate.py` issues; a v1 `set_target_values` now also works. Two
+details about `Actuate` that cost time:
 
 * The `Value` oneof field must match the catalog type exactly. `int32` into a
   `uint16` path is rejected with `INVALID_ARGUMENT: Wrong type for vss_path`.
@@ -193,4 +277,12 @@ Two details that cost time:
 ## Verifying
 
 `scripts/verify_bridge.py` uses `Actuate` and is checked both ways: it passes with
-the bridge running and fails, with a named reason, when it is stopped.
+the bridge running and fails, with a named reason, when it is stopped. The v1 side
+is covered by `test_a_v1_writer_reaches_can_even_though_v2_is_available` and
+`test_v1_and_v2_writers_are_both_accepted_at_once` in
+`tests/test_vss_to_remotive.py`, and was measured end to end on 2026-08-02:
+
+```
+v1 write:               TelltaleId=123  ChimeId=45
+read back off the bus:  {'VC_To_HMI.TelltaleId': 123, 'VC_To_HMI.ChimeId': 45}
+```
