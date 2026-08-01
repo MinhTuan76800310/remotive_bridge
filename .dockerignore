@@ -14,10 +14,13 @@ uv.lock
 tests/
 
 # Operator data. A real mapping can name internal signals and may reference a
-# token path; the image must not bake one in. mapping.example.yaml is
-# documentation and lives in the repo, not the runtime image.
+# token path; the image must not bake one in.
+#
+# mapping.example.yaml IS shipped, deliberately — but to /usr/share, never to the
+# default config path, so nothing reads it unless a caller asks for it by name.
+# It is what `run_remotive_vss_bridge.sh` falls back to, which is what lets that
+# script work without a repo checkout.
 mapping.yaml
-mapping.example.yaml
 *.local.yaml
 
 # Neighbouring packages that are not part of this service.
@@ -32,6 +35,8 @@ dist/
 *.md
 !README.md
 
-# Never send VCS metadata to the build daemon.
+# Never send VCS metadata or CI config to the build daemon.
 .git/
 .gitignore
+.github/
+run_remotive_vss_bridge.sh

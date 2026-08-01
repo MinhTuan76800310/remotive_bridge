@@ -1,0 +1,110 @@
+# Push to main -> a new linux/amd64 image on GHCR, tagged `latest`.
+#
+# `run_remotive_vss_bridge.sh` pulls `latest` on every run, so whatever this
+# workflow publishes is what every user gets on their next start. That is the
+# reason the tests gate the push: a broken commit would otherwise reach people
+# who never asked for it and have no older tag to fall back to.
+#
+# Tags (`v1.2.3`) additionally publish the semver tags, so anyone who wants to
+# pin can.
+
+name: Build & Publish Docker Image
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      multiarch:
+        description: 'Also build linux/arm64 (slow — QEMU emulation). Default: amd64 only.'
+        type: boolean
+        required: false
+        default: false
+
+# A second push while the first is still building would race to overwrite
+# `latest`. Newest wins; cancel the older run rather than publish out of order.
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  # GHCR requires a lowercase path. The account is `MinhTuan76800310`; the image
+  # must be spelled `minhtuan76800310` or the push is rejected.
+  IMAGE_NAME: minhtuan76800310/remotive_bridge
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        # Pinned to a full tag on purpose: setup-uv stopped publishing floating
+        # major tags at v8 to reduce supply-chain risk, so `@v9` does not resolve.
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+
+      # No broker, no databroker, no Docker: every test is offline by design.
+      - run: uv sync --dev
+      - run: uv run pytest -q
+
+  build:
+    name: Build & Push
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU (only when cross-building arm64)
+        if: ${{ inputs.multiarch }}
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # `latest` on every main build — that is what the run script pulls.
+          # `sha-<short>` on every build, so a bad `latest` can be identified and
+          # rolled back to a specific commit rather than guessed at.
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
+            type=sha,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: ${{ inputs.multiarch && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+
+      - name: Summary
+        run: |
+          echo "### Published" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

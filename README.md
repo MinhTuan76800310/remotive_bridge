@@ -31,6 +31,53 @@ whether the ECU acts is the ECU's business.
 
 ---
 
+## Running it without a checkout
+
+Every push to `main` publishes a `linux/amd64` image to
+`ghcr.io/minhtuan76800310/remotive_bridge:latest`
+([`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml)).
+The tests run first; a red suite publishes nothing.
+
+[`run_remotive_vss_bridge.sh`](run_remotive_vss_bridge.sh) is the whole handout —
+copy that one file to a machine with Docker and it works:
+
+```bash
+./run_remotive_vss_bridge.sh                  # the example mapping shipped in the image
+./run_remotive_vss_bridge.sh my-vehicle.yaml  # your own, mounted read-only
+./run_remotive_vss_bridge.sh -h               # options
+```
+
+It pulls `latest` on every run and runs with `--rm`, so you always get the
+current bridge and nothing is left behind. **Ctrl+C is the correct way to stop
+it** — the graceful path is what stops the restbus frames the bridge started
+(see *Purity*, below).
+
+The image ships `mapping.example.yaml` at
+`/usr/share/kx-vss-bridge/mapping.example.yaml`, but *not* at the default config
+path. Mount your own or the bridge starts against the example's signal names —
+which is why the fallback is explicit in the script rather than baked into `CMD`.
+
+| Variable | Default | Use when |
+|---|---|---|
+| `BRIDGE_NETWORK` | `host` | the peers are in containers: `BRIDGE_NETWORK=vss_hmi_vcar_----control_network` |
+| `BRIDGE_HEALTH_PORT` | `8090` | published only on a non-host network |
+| `BRIDGE_IMAGE` | `…/remotive_bridge:latest` | pinning a `sha-…` tag to roll back |
+| `BRIDGE_PULL` | `always` | `never` to run the local image offline |
+| `BRIDGE_ENGINE` | auto | forcing `podman` where both are installed |
+
+The default is host networking because the example mapping points at
+`127.0.0.1`. On a bridged network that address is the container itself, not your
+peers — change both together.
+
+**One-time, after the first successful build:** GHCR creates a new package
+*private*, so `docker pull` fails with `unauthorized` for everyone but you. Make
+it public at
+`github.com/users/MinhTuan76800310/packages/container/remotive_bridge/settings`
+→ *Change visibility* → Public. Until then, users need
+`docker login ghcr.io` with a `read:packages` token.
+
+---
+
 ## Quick start
 
 You need a running vCar and a running databroker. Both are in this repository:
@@ -453,6 +500,9 @@ id, so there is nothing to catch. Either target a namespace an ECU drives, or le
 
 ## Running as a container
 
+For the published image, use [`run_remotive_vss_bridge.sh`](run_remotive_vss_bridge.sh)
+(above). To build and run your own:
+
 ```bash
 docker build -t kx-vss-bridge:0.1.0 .
 
@@ -462,6 +512,9 @@ docker run --rm \
   -p 8090:8090 \
   kx-vss-bridge:0.1.0
 ```
+
+The script runs the same image the same way; `BRIDGE_IMAGE=kx-vss-bridge:0.1.0
+BRIDGE_PULL=never ./run_remotive_vss_bridge.sh mapping.yaml` uses a local build.
 
 The network name is `vcar-{vac_name}` + `_----control_network` — four hyphens,
 the topology builder's own convention (`app/instance/broker_addr.py:41`). For the
@@ -506,7 +559,7 @@ and both gRPC connections are closed.
 
 ```bash
 uv sync --dev
-uv run pytest -q          # 222 tests, no vCar or databroker needed
+uv run pytest -q          # 231 tests, no vCar or databroker needed
 ```
 
 The suite uses fake peers throughout. Both loops and validation were additionally
