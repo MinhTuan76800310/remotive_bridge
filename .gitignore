@@ -16,6 +16,12 @@ build/
 mapping.yaml
 *.local.yaml
 
+# Scratch space for a real vehicle's files — mappings pasted off a server, the
+# DBCs its topology was built from, captured logs. This repo is PUBLIC, and a
+# customer communication matrix names every ECU and signal on the car. Keep it
+# local; nothing in here is needed to build or run the bridge.
+360c-management_workspace/
+
 # Secrets. Nothing in this repo should ever need one, but an accidental .env is
 # the classic way credentials reach a remote.
 .env
