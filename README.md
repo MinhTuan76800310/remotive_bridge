@@ -1,9 +1,7 @@
 # kx-vss-bridge
 
-A standalone service that maps RemotiveLabs CAN signals to Eclipse KUKSA VSS
-signals, 1-to-1, in both directions.
-
-The bridge is a client on both ends. It owns no state, embeds no databroker, and
+Maps RemotiveLabs CAN signals to Eclipse KUKSA VSS signals, 1-to-1, in both
+directions. A client on both ends: it owns no state, embeds no databroker, and
 publishes no signal of its own.
 
 ```
@@ -18,23 +16,422 @@ publishes no signal of its own.
 ┌───────────────┴──────────────┐
 │  KUKSA databroker            │
 │  VSS 6.0 + overlays          │
-└──────────────────────────────┘
+└───────────────┬──────────────┘
+                │
+     cpd-core, dashboards, …
 ```
 
-- **Remotive → VSS** writes **current values** (what the vehicle reports).
-- **VSS → Remotive** reads **actuation targets** (what a function commands) and
-  writes them to the restbus.
+| Direction | Reads | Writes |
+|---|---|---|
+| Remotive → VSS | CAN signals | VSS **current values** — what the vehicle reports |
+| VSS → Remotive | VSS **actuation targets** — what a function commands | the CAN restbus |
 
-Design: [`docs/superpowers/specs/2026-08-01-vss-remotive-bridge-design.md`](../docs/superpowers/specs/2026-08-01-vss-remotive-bridge-design.md)
+The bridge commands; it does not perform. It sets the CAN value an ECU will read;
+whether the ECU acts is the ECU's business.
 
-## Status
+---
 
-Under implementation. The full operator runbook — mapping reference, transforms,
-networking, `/health` and `/stats` — lands with the documentation task.
+## Quick start
+
+You need a running vCar and a running databroker. Both are in this repository:
+`vss-vcar/` is a two-ECU rig, and the CPD package ships a databroker with the
+overlay the example mapping expects.
+
+```bash
+# 1. Install
+uv sync --dev
+
+# 2. Start the vCar (needs an active RemotiveTopology subscription)
+cd vss-vcar
+remotive topology generate -f instances/main.instance.yaml build   # CLI ≥0.20: 'build'
+cd build/vss_hmi_vcar && docker compose up --build -d && cd -
+
+# 3. Confirm the databroker has the CPD overlay (port 55557 in the shipped stack)
+#    A bare databroker on 55555 has only standard VSS 6.0; the three overlay
+#    paths will be dropped at validation with a clear reason.
+
+# 4. Run the bridge
+.venv/bin/kx-vss-bridge --config mapping.example.yaml
+```
+
+Then watch it work:
+
+```bash
+curl -s localhost:8090/health | python3 -m json.tool
+```
+
+```json
+{
+  "status": "ok",
+  "uptime_s": 5.7,
+  "remotive": {"connected": true, "phase": "streaming", "batches": 31, "signals": 124},
+  "kuksa":    {"connected": true, "phase": "writing"},
+  "mapping":  {"to_vss": 4, "to_can": 2, "to_vss_writes": 124, "to_vss_drops": 0}
+}
+```
+
+The rig runs a scenario loop, so `Vehicle.LowVoltageSystemState` and
+`Vehicle.Cabin.ChildPresence.IsDetected` move on their own every 30 s:
+
+```bash
+docker run --rm --network host ghcr.io/eclipse-kuksa/kuksa-databroker-cli:main \
+  --server 127.0.0.1:55557
+# then:  get Vehicle.LowVoltageSystemState Vehicle.Cabin.ChildPresence.IsDetected
+```
+
+**Use `.venv/bin/kx-vss-bridge`, not `uv run kx-vss-bridge`.** `uv run` re-resolves
+the project on each start and, in a non-interactive shell, can swallow the
+process's output entirely — you get an empty log and a confusing exit code. The
+console script has no such problem.
+
+---
+
+## Watching it work
+
+Two things to change, two things to watch. Start the bridge first:
+
+```bash
+.venv/bin/kx-vss-bridge --config mapping.example.yaml
+```
+
+### The Remotive side: the broker dashboard
+
+```bash
+docker run -d --rm --name remotive-webapp -p 8088:8080 \
+  remotivelabs/remotive-web-app:1.15
+```
+
+Open <http://localhost:8088> and connect it to **`http://localhost:50051`** — the
+rig's `topology-api` serves gRPC-web there, which is what a browser needs. Then
+subscribe to `VC_To_HMI.TelltaleId` and `VSS_VehicleState.*` on the
+`topology-VehicleCAN` namespace.
+
+**Note the port mapping: `8088:8080`, not `8088:80`.** The image `EXPOSE`s 80 but
+its nginx actually listens on 8080, so publishing against 80 gives a connection
+reset with the container apparently healthy.
+
+**Use `topology-VehicleCAN`, not `BCM-VehicleCAN`.** It is owned by no ECU model,
+so it sees everything on the bus. CAN loopback filtering can suppress a frame in
+the transmitting ECU's own namespace, which makes a read there prove nothing.
+
+Prefer a terminal? Same thing, no browser:
+
+```bash
+remotive broker signals subscribe --url http://127.0.0.1:50051 \
+  --signal topology-VehicleCAN:VC_To_HMI.TelltaleId \
+  --signal topology-VehicleCAN:VSS_VehicleState.Vehicle_LowVoltageSystemState \
+  --on-change-only
+```
+
+There is also `remotive studio . --broker-url http://127.0.0.1:50051` from inside
+`vss-vcar/` (port 57123), which adds the topology view on top of signal
+inspection.
+
+### The VSS side: databroker-cli
+
+```bash
+docker run --rm -it --network host \
+  ghcr.io/eclipse-kuksa/kuksa-databroker-cli:main --server 127.0.0.1:55557
+```
+
+Then inside it:
+
+```
+subscribe Vehicle.LowVoltageSystemState Vehicle.Cabin.ChildPresence.IsDetected
+```
+
+---
+
+### Remotive → VSS: change a CAN signal, watch VSS
+
+Change it:
+
+```bash
+remotive broker restbus update --url http://127.0.0.1:50051 \
+  --signal 'BCM-VehicleCAN:VSS_VehicleState.Vehicle_LowVoltageSystemState:5'
+```
+
+Watch `Vehicle.LowVoltageSystemState` in databroker-cli go to `"START"`. Verified:
+
+```
+before:  Vehicle.LowVoltageSystemState = OFF
+         → restbus update ... :5
+after:   Vehicle.LowVoltageSystemState = START
+```
+
+`5` is `START` in the DBC's `VAL_` table, and the bridge's `enum` transform turns
+it into the string the VSS catalog declares. The rig's own scenario loop only ever
+emits `2` (OFF) and `4` (ON), so a `START` cannot be a coincidence.
+
+Other values to try: `1` LOCK · `2` OFF · `3` ACC · `4` ON. Or child presence,
+which CPD reacts to:
+
+```bash
+remotive broker restbus update --url http://127.0.0.1:50051 \
+  --signal 'BCM-VehicleCAN:VSS_VehicleState.Vehicle_Cabin_ChildPresence_IsDetected:1'
+```
+
+The BCM scenario loop rewrites these signals every ~30 s, so a manual value holds
+only until the loop's next write. To keep it stable, set `BCM_SCENARIO=0` on the
+`bcm` service and restart it.
+
+### VSS → Remotive: command an actuator, watch CAN
+
+```bash
+.venv/bin/python scripts/actuate.py Vehicle.Cabin.HMI.TelltaleId 2
+#  Vehicle.Cabin.HMI.TelltaleId = 2  (UINT16, delivered to provider)
+```
+
+Watch `VC_To_HMI.TelltaleId` in Studio start showing `2`. Verified — observed
+counts over 14 s:
+
+```
+value 0:   8      ← VC's own
+value 1:  98      ← VC's own
+value 2:  80      ← ours, via the bridge
+value 41: 29      ← cpd-core's telltale, also through the bridge
+```
+
+**Expect `2` to alternate with VC's values rather than replace them.** VC also
+transmits `VC_To_HMI`, so the bridge is a second transmitter and both write every
+cycle (finding F9). Seeing `2` at all is the proof; seeing it exclusively would
+mean VC had stopped.
+
+If a previous run's value is latched in the restbus, clear it:
+
+```bash
+remotive broker restbus reset --url http://127.0.0.1:50051 --namespace BCM-VehicleCAN
+```
+
+### Why `scripts/actuate.py` and not databroker-cli
+
+`databroker-cli`'s `actuate`, and `kuksa-client`'s `set_target_values()`, both
+write the **v1 Target Value** field. The bridge registers as a **v2 provider** and
+waits for *Actuation* requests. v1 has no actuation, v2 has no target value, so
+the write succeeds, reads back fine, and the provider never hears about it — no
+error anywhere. Measured on kuksa-client 0.5.2; see
+[`docs/spike-f1-f6-findings.md`](docs/spike-f1-f6-findings.md) (F11).
+
+`scripts/actuate.py` issues the v2 `Actuate` call, and reads the path's declared
+type first so `uint16` vs `int32` cannot bite you.
+
+| Exit | Meaning |
+|---|---|
+| 0 | delivered to the provider |
+| 1 | `no provider is registered` — bridge not running, or path absent from `to_can` |
+| 2 | bad path or value |
+
+### Both at once, automatically
+
+```bash
+.venv/bin/python scripts/verify_bridge.py
+```
+
+Checks both directions with sentinel values and exits 0 only if both pass. It does
+not import the bridge — it talks to the two peers as any third party would, so a
+PASS means the *deployed* bridge moved a value. Confirmed to fail, with a named
+reason, when the bridge is stopped.
+
+---
+
+## Configuration
+
+One file, one bridge instance. Nothing is discovered; nothing is ambient. Start
+from [`mapping.example.yaml`](mapping.example.yaml) — it is a working file, not a
+skeleton.
+
+```yaml
+remotive:
+  url: http://topology-broker.com:50051
+
+kuksa:
+  host: kuksa-databroker
+  port: 55557
+  # token: /run/secrets/kuksa.jwt     # only if the databroker enforces auth
+
+options:
+  seed_seconds: 3      # read cyclically this long before switching to on-change
+  retry_delay: 10      # backoff between reconnects, both peers
+  health_host: 0.0.0.0
+  health_port: 8090
+
+to_vss:                # CAN → VSS current values
+  - can:  {namespace: BCM-VehicleCAN, signal: VSS_VehicleState.Vehicle_LowVoltageSystemState}
+    vss:  Vehicle.LowVoltageSystemState
+    type: string
+    transform:
+      op: enum
+      map: {0: UNDEFINED, 1: LOCK, 2: "OFF", 3: ACC, 4: "ON", 5: START}
+
+to_can:                # VSS actuation targets → CAN
+  - vss:  Vehicle.Cabin.HMI.TelltaleId
+    can:  {namespace: BCM-VehicleCAN, signal: VC_To_HMI.TelltaleId}
+    type: int
+    range: {min: 0, max: 255}
+    allow_add: true
+```
+
+### Three things that will bite you
+
+**Quote `ON` and `OFF`.** YAML 1.1 reads bare `on`, `off`, `yes`, `no` as
+booleans. Two of the six `LowVoltageSystemState` values are `ON` and `OFF`, so
+written naturally they become `True`/`False`, the databroker gets a boolean where
+the catalog declares a string, and CPD never triggers — with no error anywhere.
+The bridge refuses this at startup and names the key.
+
+**`type` is mandatory.** Two measured reasons on kuksa-client 0.5.2:
+`Datapoint("0")` evaluates to `True` (only `"False"/"false"/"F"/"f"` are falsy),
+so an untyped CAN `0` inverts every boolean; and without a declared type, `set()`
+performs a metadata round-trip before *every* write.
+
+**Signal names are message-qualified.** `VSS_VehicleState.Vehicle_Body_Horn_IsActive`,
+not `Vehicle_Body_Horn_IsActive`. A bare name is a silent `NOT_FOUND` at runtime,
+so the bridge rejects it at parse time. Find the real names with:
+
+```python
+async with BrokerClient(url="http://127.0.0.1:50051") as c:
+    for f in await c.list_frame_infos("BCM-VehicleCAN"):
+        print(f.name, f.cycle_time_millis, list(f.signals))
+```
+
+### Reference
+
+| Field | Meaning |
+|---|---|
+| `type` | `boolean` · `string` · `int` · `float`. Mandatory. |
+| `transform.op` | `passthrough` · `linear` (`scale`, `offset`) · `threshold` (`gt`, `true_value`, `false_value`) · `enum` (`map`) |
+| `range` | `{min, max}`, checked by the bridge on the value being sent. kuksa-client does not range-check: `12.7` into a `UINT8` silently becomes `12`. |
+| `allow_add` | default `true`. Whether the bridge may add this frame to the restbus. |
+
+Every transform has an inverse, because the VSS→CAN direction runs the mapping
+backwards. `enum` inverts by reverse lookup, so two keys mapping to one value is
+rejected as non-invertible. `threshold` discards magnitude, so it inverts to
+`true_value`/`false_value` rather than pretending to reconstruct the input.
+
+---
+
+## What happens at startup
+
+The mapping is checked against what the peers actually contain, on every Remotive
+connection.
+
+| Finding | Action |
+|---|---|
+| Signal or namespace absent from the vehicle | **dropped**, reason in `/stats.mapping.skipped` |
+| VSS path absent from the databroker catalog | **dropped**, same |
+| Frame has no cycle time (`to_vss`) | warned — seeding cannot reach it |
+| An ECU also transmits this frame (`to_can`) | warned — see F9 below |
+| `allow_add: false` and no ECU drives the frame | warned — see F10 below |
+
+A **malformed entry** is dropped and reported; the rest run. A **structural**
+problem — unreadable file, broken peer section, nothing usable at all — exits
+non-zero, because starting would only hide it behind a healthy-looking container.
+
+---
+
+## Measured RemotiveLabs behaviour
+
+Four findings from a live rig, 2026-08-01. Full method and output in
+[`docs/spike-f1-f6-findings.md`](docs/spike-f1-f6-findings.md).
+
+**`add()` is destructive per client, not per namespace.** Adding a frame to a
+namespace where an ECU runs its own restbus left that ECU's frames cycling
+untouched. So `allow_add: true` is a safe default. Every frame still goes in one
+`add()` call, because `Add` *does* remove the calling client's previous
+configuration — adding incrementally would erase the earlier frames.
+
+**A restbus write does reach the bus**, even on a frame an ECU transmits, and even
+with no `add()` at all. `app/signals/service.py` in `kx360v-management` records the
+opposite; that measurement used `{ECU}_DUMMY`, where two signals share one 8-byte
+frame and the stub echoes at flood rate — a self-feeding loop, not a property of
+frames.
+
+**F9 — writing a frame an ECU also transmits makes you a second transmitter.**
+Both writes land; the receiver sees the value alternate at cycle rate. Measured:
+frame rate doubled, values split evenly between the two writers. Validation warns.
+On a production vehicle, write frames no ECU already drives.
+
+**F10 — `update_signals` on a namespace whose restbus holds no such frame is
+silently ignored.** No error, nothing delivered. `UpdateRequest` carries no client
+id, so there is nothing to catch. Either target a namespace an ECU drives, or let
+`allow_add` add the frame first.
+
+---
+
+## Running as a container
+
+```bash
+docker build -t kx-vss-bridge:0.1.0 .
+
+docker run --rm \
+  --network "vcar-${VAC_NAME}_----control_network" \
+  -v "$PWD/mapping.yaml:/config/mapping.yaml:ro" \
+  -p 8090:8090 \
+  kx-vss-bridge:0.1.0
+```
+
+The network name is `vcar-{vac_name}` + `_----control_network` — four hyphens,
+the topology builder's own convention (`app/instance/broker_addr.py:41`). For the
+`vss-vcar` rig it is `vss_hmi_vcar_----control_network`.
+
+**From a container, use the service name and the container-side port:**
+`http://topology-broker.com:50051`. The host-published port is bound to
+`127.0.0.1` and is unreachable from any container — and the host port changes
+across rebuilds while the service name does not.
+
+If the databroker is also containerised, the bridge needs a network that reaches
+it too. Joining the vCar network alone will not resolve an external
+`kuksa-databroker` hostname.
+
+---
+
+## Operating it
+
+`GET /health` returns **200 whenever the process can answer**; degradation is in
+the body. This is deliberate — a bridge waiting for a peer is working as designed,
+and an orchestrator that restarted it on a 503 would destroy the retry behaviour.
+
+`status` is `ok` only when both peers are connected *and* nothing was skipped.
+
+`GET /stats` adds per-entry drop reasons and validation warnings.
+
+The bridge never exits on a peer failure. Each direction is two independent
+workers joined by a bounded latest-value buffer, so:
+
+- KUKSA down → the reader keeps consuming CAN; newer values replace older ones per
+  path; the whole snapshot is flushed on reconnect.
+- Broker down → the target reader keeps consuming VSS; frames are re-added and the
+  snapshot flushed on reconnect.
+- Either restarting → validation re-runs, so a rebuilt vehicle is picked up.
+
+Shutdown is graceful on SIGTERM and SIGINT: tasks are cancelled, the health socket
+and both gRPC connections are closed.
+
+---
 
 ## Development
 
 ```bash
 uv sync --dev
-uv run pytest -q
+uv run pytest -q          # 222 tests, no vCar or databroker needed
 ```
+
+The suite uses fake peers throughout. Both loops and validation were additionally
+verified against the live rig; the transform, state, validation and loop modules
+were mutation-tested by injecting known bugs and confirming each was caught.
+
+```
+src/kx_vss_bridge/
+  __main__.py         CLI, lifecycle, signal handling
+  config.py           parse + validate the mapping into immutable indexes
+  transform.py        coercion, transforms, inverses, range checks (pure)
+  state.py            counters + the two bounded hand-off buffers
+  validation.py       cross-check the mapping against both live peers
+  remotive_to_vss.py  Loop A: broker reader ‖ KUKSA current-value writer
+  vss_to_remotive.py  Loop B: KUKSA target reader ‖ restbus writer
+  health.py           /health + /stats
+scripts/
+  spike_restbus.py    the F1/F6 experiment, re-runnable
+```
+
+Design: [`../docs/superpowers/specs/2026-08-01-vss-remotive-bridge-design.md`](../docs/superpowers/specs/2026-08-01-vss-remotive-bridge-design.md)

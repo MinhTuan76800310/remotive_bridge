@@ -23,9 +23,16 @@ mapping.yaml
 *.pem
 *.key
 
-# Generated topology output. `make gen` recreates build/ from instances/, and
-# the checked-in copy embeds the absolute paths of whichever machine ran it.
+# Generated topology output. `remotive topology generate` recreates build/ from
+# instances/, and the generated copy embeds the absolute paths of whichever
+# machine ran it.
 vss-vcar/build/
+
+# The CPD package is a separate deliverable that ships with its own container
+# images. Only its docs and overlay are present here, so its SHA256SUMS does not
+# verify — publishing that partial copy would ship something broken. Get the
+# real package from its own release.
+cpd-core-only-1.0.0/
 
 # Editor / OS noise
 .DS_Store

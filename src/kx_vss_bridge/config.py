@@ -284,7 +284,42 @@ def _parse_can_signal(raw: Any) -> CanSignal:
     return CanSignal(namespace=namespace, frame=frame, signal=signal)
 
 
-def _parse_transform(raw: Any) -> TransformSpec:
+def _check_enum_value_type(key: Any, value: Any, value_type: ValueType) -> None:
+    """Reject an enum output that cannot be the declared type.
+
+    Mostly this catches YAML 1.1's truthiness rules. `ON` and `OFF` are two of
+    the six `Vehicle.LowVoltageSystemState` values, and written naturally —
+    unquoted — YAML parses them as booleans. The mapping then feeds `False` to a
+    path the catalog declares as a string, and the failure surfaces far from its
+    cause: either the databroker rejects the write, or the operator sees no alert
+    and no error at all.
+
+    The fix is one character, so the message says so.
+    """
+    if isinstance(value, bool) and value_type is not ValueType.BOOLEAN:
+        raise _EntryError(
+            f"transform.map[{key!r}] is the boolean {value!r}, but type is "
+            f"{value_type.value!r}. YAML reads bare y/n/yes/no/on/off/true/false as "
+            f"booleans — quote the value (e.g. \"{'ON' if value else 'OFF'}\") to keep "
+            f"it a string"
+        )
+
+    if value_type is ValueType.STRING and not isinstance(value, str):
+        raise _EntryError(
+            f"transform.map[{key!r}] is {type(value).__name__} {value!r}, but type is "
+            f"'string'; quote it to keep it a string"
+        )
+
+    if value_type in (ValueType.INT, ValueType.FLOAT) and not isinstance(
+        value, (int, float)
+    ):
+        raise _EntryError(
+            f"transform.map[{key!r}] is {value!r}, which is not a "
+            f"{value_type.value}"
+        )
+
+
+def _parse_transform(raw: Any, value_type: ValueType) -> TransformSpec:
     if raw is None:
         return TransformSpec(op=TransformOp.PASSTHROUGH)
     if not isinstance(raw, MappingABC):
@@ -326,6 +361,7 @@ def _parse_transform(raw: Any) -> TransformSpec:
         forward = dict(mapping)
         inverse: dict[Any, Any] = {}
         for key, value in forward.items():
+            _check_enum_value_type(key, value, value_type)
             if value in inverse:
                 # Loop B inverts by reverse lookup. Two keys sharing a value
                 # make that ambiguous, so refuse rather than pick one.
@@ -382,7 +418,7 @@ def _parse_entry(raw: Any, *, default_allow_add: bool) -> Mapping:
         can=_parse_can_signal(raw.get("can")),
         vss=_require_str(raw.get("vss"), "vss"),
         value_type=value_type,
-        transform=_parse_transform(raw.get("transform")),
+        transform=_parse_transform(raw.get("transform"), value_type),
         value_range=_parse_range(raw.get("range")),
         allow_add=allow_add,
     )

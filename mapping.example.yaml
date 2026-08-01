@@ -1,0 +1,94 @@
+# kx-vss-bridge — mapping for the vss-vcar rig.
+#
+# This is a WORKING example, not a template: the signal names below are the ones
+# in bridge/vss-vcar, and the VSS paths are the ones the CPD databroker carries.
+# Run it as-is against that rig, then edit for your own vehicle.
+#
+#   uv run kx-vss-bridge --config mapping.example.yaml
+#
+# For your own vehicle, the names come from:
+#   remotive:  BrokerClient.list_frame_infos(namespace)  -> Frame.Signal
+#   kuksa:     the catalog the databroker was started with
+
+remotive:
+  # From a container on the vCar network, use the service name and the
+  # container-side port: http://topology-broker.com:50051
+  # The host-published port is bound to 127.0.0.1 and is unreachable from any
+  # container. From the host, 127.0.0.1:50051 is correct.
+  url: http://127.0.0.1:50051
+
+kuksa:
+  host: 127.0.0.1
+  # 55557 is the CPD stack's databroker: standard VSS 6.0 *plus* the overlay that
+  # declares ChildPresence.IsDetected and the two Cabin.HMI paths. A bare 55555
+  # databroker has only the standard catalog, and the overlay paths will be
+  # dropped at validation with a clear reason.
+  port: 55557
+  # token: /run/secrets/kuksa.jwt    # only if the databroker enforces auth
+
+options:
+  seed_seconds: 3      # how long to read cyclically before switching to on-change
+  retry_delay: 10      # backoff between reconnect attempts, both peers
+  health_host: 0.0.0.0
+  health_port: 8090
+
+# ── Remotive → VSS : current values (what the vehicle reports) ────────────────
+to_vss:
+  # `type` is MANDATORY on every entry. Without it kuksa-client fetches the type
+  # before every single write, and Datapoint("0") evaluates to True — an untyped
+  # CAN 0 would invert the meaning of every boolean.
+  - can: {namespace: BCM-VehicleCAN, signal: VSS_VehicleState.Vehicle_LowVoltageSystemState}
+    vss: Vehicle.LowVoltageSystemState
+    type: string
+    transform:
+      op: enum
+      # NOTE THE QUOTES around "OFF" and "ON". YAML reads bare on/off/yes/no as
+      # booleans, so unquoted they become False and True — the bridge would send
+      # a boolean where the catalog declares a string, and CPD would never
+      # trigger. The bridge refuses this at startup rather than letting it slide.
+      map: {0: UNDEFINED, 1: LOCK, 2: "OFF", 3: ACC, 4: "ON", 5: START}
+
+  - can: {namespace: BCM-VehicleCAN, signal: VSS_VehicleState.Vehicle_Cabin_ChildPresence_IsDetected}
+    vss: Vehicle.Cabin.ChildPresence.IsDetected
+    type: string
+    transform:
+      op: enum
+      map: {0: NOT_DETECTED, 1: DETECTED}
+
+  - can: {namespace: BCM-VehicleCAN, signal: VSS_VehicleState.Vehicle_Body_Horn_IsActive}
+    vss: Vehicle.Body.Horn.IsActive
+    type: boolean
+    transform: {op: threshold, gt: 0}
+
+  - can: {namespace: BCM-VehicleCAN, signal: VSS_VehicleState.Vehicle_Body_Lights_Hazard_IsSignaling}
+    vss: Vehicle.Body.Lights.Hazard.IsSignaling
+    type: boolean
+    transform: {op: threshold, gt: 0}
+
+# ── VSS → Remotive : actuation targets (what a function commands) ─────────────
+#
+# This direction reads TARGET values, not current values. CPD writes a target;
+# the bridge puts it on CAN; the ECU decides what to do about it.
+#
+# Measured against this rig on 2026-08-01: VC also transmits VC_To_HMI, so the
+# bridge becomes a SECOND transmitter and the value alternates between them at
+# cycle rate. Validation warns about exactly this at startup. It is a real
+# mapping decision, not a bug to tune around — on a production vehicle, write
+# frames no ECU already drives.
+to_can:
+  - vss: Vehicle.Cabin.HMI.TelltaleId
+    can: {namespace: BCM-VehicleCAN, signal: VC_To_HMI.TelltaleId}
+    type: int
+    range: {min: 0, max: 255}
+    # allow_add defaults to true. Measured: add() removes only THIS client's
+    # previous restbus configuration, never another ECU's, so adding to a
+    # namespace an ECU owns is safe. Set false only when an ECU already
+    # transmits the frame — with false and no ECU driving it, update_signals is
+    # silently ignored and the mapping is inert.
+    allow_add: true
+
+  - vss: Vehicle.Cabin.HMI.ChimeId
+    can: {namespace: BCM-VehicleCAN, signal: VC_To_HMI.ChimeId}
+    type: int
+    range: {min: 0, max: 255}
+    allow_add: true

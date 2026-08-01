@@ -33,7 +33,7 @@ to_vss:
     type: string
     transform:
       op: enum
-      map: {0: UNDEFINED, 1: LOCK, 2: OFF, 3: ACC, 4: ON, 5: START}
+      map: {0: UNDEFINED, 1: LOCK, 2: "OFF", 3: ACC, 4: "ON", 5: START}
 
 to_can:
   - vss: Vehicle.Body.Horn.IsActive
@@ -175,7 +175,7 @@ def test_non_invertible_enum_is_skipped():
           type: string
           transform:
             op: enum
-            map: {0: OFF, 1: OFF}
+            map: {0: "OFF", 1: "OFF"}
         """,
     )
     result = load_config_text(raw)
@@ -365,7 +365,7 @@ def test_yaml_coerced_signal_name_is_rejected():
 
 
 def test_yaml_norway_problem_in_enum_values_is_preserved():
-    """Unquoted NO parses as False. An enum label must stay a string."""
+    """Quoted enum labels survive YAML's truthiness rules."""
     raw = _with(
         "to_vss",
         """
@@ -379,6 +379,67 @@ def test_yaml_norway_problem_in_enum_values_is_preserved():
     )
     result = load_config_text(raw)
     assert result.config.to_vss[0].transform.enum_map[0] == "NO"
+
+
+def test_unquoted_on_off_in_an_enum_is_rejected_with_advice():
+    """The Norway problem, on the exact signal CPD depends on.
+
+    YAML 1.1 parses bare ON and OFF as booleans, and they are two of the six
+    LowVoltageSystemState values. Written naturally and unquoted, the mapping
+    silently yields `False` where the VSS catalog requires the string "OFF" —
+    the databroker rejects it, or worse, the operator sees no alert and no error.
+    Refuse, and say how to fix it.
+    """
+    raw = _with(
+        "to_vss",
+        """
+        - can: {namespace: BCM-VehicleCAN, signal: F.S}
+          vss: Vehicle.LowVoltageSystemState
+          type: string
+          transform:
+            op: enum
+            map: {0: UNDEFINED, 1: LOCK, 2: OFF, 3: ACC, 4: ON, 5: START}
+        """,
+    )
+    result = load_config_text(raw)
+    assert not result.config.to_vss
+    reason = result.skipped[0].reason
+    assert "quote" in reason.lower()
+    assert "2" in reason  # names the offending key
+
+
+def test_enum_values_must_match_the_declared_type():
+    raw = _with(
+        "to_vss",
+        """
+        - can: {namespace: BCM-VehicleCAN, signal: F.S}
+          vss: Vehicle.Speed
+          type: float
+          transform:
+            op: enum
+            map: {0: NotANumber}
+        """,
+    )
+    result = load_config_text(raw)
+    assert not result.config.to_vss
+    assert "float" in result.skipped[0].reason
+
+
+def test_a_boolean_typed_enum_may_map_to_booleans():
+    """Only reject a bool where the declared type is not boolean."""
+    raw = _with(
+        "to_vss",
+        """
+        - can: {namespace: BCM-VehicleCAN, signal: F.S}
+          vss: Vehicle.Body.Horn.IsActive
+          type: boolean
+          transform:
+            op: enum
+            map: {0: false, 1: true}
+        """,
+    )
+    result = load_config_text(raw)
+    assert result.config.to_vss[0].transform.enum_map[1] is True
 
 
 def test_unknown_type_is_skipped():
