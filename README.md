@@ -7,16 +7,16 @@ publishes no signal of its own.
 ```
 ┌─ vCar (RemotiveLabs) ────────┐
 │  ECUs ──── topology-broker   │
-└──────────────┬──────────────┘
+└───────────────┬──────────────┘
                 │ gRPC 50051
          ┌──────┴───────┐
          │  vss-bridge  │ ←── mapping.yaml
          └──────┬───────┘
                 │ gRPC 55555
-┌──────────────┴──────────────┐
+┌───────────────┴──────────────┐
 │  KUKSA databroker            │
 │  VSS 6.0 + overlays          │
-└──────────────┬──────────────┘
+└───────────────┬──────────────┘
                 │
      cpd-core, dashboards, …
 ```

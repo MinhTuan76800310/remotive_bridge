@@ -43,7 +43,7 @@ from kuksa_client.grpc.aio import VSSClient
 from remotivelabs.broker import BrokerClient
 from remotivelabs.broker.restbus import RestbusSignalConfig
 
-# ── the rig (bridge/vss-vcar) ────────────────────────────────────────
+# ── the rig (bridge/vss-vcar) ────────────────────────────────────────────────
 BCM_NS = "BCM-VehicleCAN"
 OBSERVE_NS = "topology-VehicleCAN"  # owned by no ECU model
 

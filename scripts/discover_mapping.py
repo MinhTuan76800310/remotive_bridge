@@ -170,7 +170,7 @@ def _emit(url: str, infos: list, kuksa_host: str, kuksa_port: int) -> None:
         out("# The broker reported no signals. Has the topology finished building?\n")
         return
 
-    out("# ── Remotive -> VSS : current values ─────────────────────────────────\n")
+    out("# ── Remotive -> VSS : current values ───────────────────────────────────\n")
     out("#\n")
     out("# `type` is MANDATORY. Without it kuksa-client fetches the type before\n")
     out("# every write, and Datapoint(\"0\") is truthy — an untyped CAN 0 would\n")
@@ -192,7 +192,7 @@ def _emit(url: str, infos: list, kuksa_host: str, kuksa_port: int) -> None:
             out("  #   type: TODO   # boolean | string | int | float\n")
 
     out("\n")
-    out("# ── VSS -> Remotive : actuation targets ──────────────────────────────\n")
+    out("# ── VSS -> Remotive : actuation targets ────────────────────────────────\n")
     out("#\n")
     out("# One measured warning before you uncomment anything here:\n")
     out("#\n")
