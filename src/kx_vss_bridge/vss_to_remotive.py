@@ -38,9 +38,11 @@ client's own v1 fallback does not help because it triggers only on
 UNIMPLEMENTED — which a broker that serves v2 never returns. See
 `_subscribe_both_protocols`.
 
-Targets are seeded with `get_target_values()` before subscribing, because both
-subscriptions report *changes*. A target set while the bridge was down would
-otherwise never arrive.
+Targets are seeded with `get_target_values()` before subscribing, because the v2
+subscription reports *changes only*: a target set while the bridge was down would
+otherwise never arrive. The v1 subscription does not need the seed — measured
+2026-08-02, it replays the stored target at subscribe time — but the seed is cheap
+and is the only cover for v2 when the v1 branch is dormant.
 """
 
 from __future__ import annotations
@@ -222,8 +224,9 @@ async def run_kuksa_target_reader(
             async with kuksa_factory() as kuksa:
                 await state.set_peer(Peer.KUKSA, connected=True, phase="reading targets")
 
-                # Seed first: the subscriptions report changes only, so a target
-                # set before we connected would never be delivered.
+                # Seed first: the v2 subscription reports changes only, so a
+                # target set before we connected would never be delivered. (v1
+                # replays it, but v1 may be dormant on this databroker.)
                 for path, datapoint in (await kuksa.get_target_values(paths)).items():
                     mapping = index.get(path)
                     if mapping is not None:
