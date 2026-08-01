@@ -1,0 +1,32 @@
+# Isolation overlay — silence the rig so only YOU change signals.
+#
+#   docker compose -f docker-compose.yml -f ../../isolate.override.yml up -d
+#
+# Two sources of autonomous signal traffic, and this file removes both:
+#
+# 1. BCM runs a built-in scenario loop (driving → parked → child left behind →
+#    child removed, ~30 s per cycle) that rewrites ChildPresence.IsDetected and
+#    LowVoltageSystemState on a timer. BCM_SCENARIO=0 freezes it: BCM still
+#    provides the frame and still serves its restbus, it just stops driving the
+#    values itself.
+#
+# 2. VC maps VSS_VehicleState → VC_To_HMI and reacts to whatever it sees. With
+#    the scenario frozen it has nothing to react to, so it goes quiet on its own
+#    — but it also *transmits* VC_To_HMI at 100 ms, which makes the bridge a
+#    second transmitter on that frame and the value alternates between them
+#    (finding F9). Scaling vc to 0 removes that contention, so a value you set
+#    from VSS is the only value on the frame.
+#
+# Keep VC running instead (drop the `vc:` block below) if you want to watch the
+# real CPD chain react — but then expect VC_To_HMI to alternate.
+#
+# The brokers, the topology broker and topology-api are untouched.
+
+services:
+  bcm:
+    environment:
+      - BCM_SCENARIO=0
+
+  vc:
+    deploy:
+      replicas: 0

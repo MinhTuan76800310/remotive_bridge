@@ -86,6 +86,94 @@ console script has no such problem.
 
 ---
 
+## Isolating the rig — only your changes move
+
+By default the rig drives itself, which makes it useless for "I changed X,
+therefore Y changed". Two things move signals on their own:
+
+**BCM runs a scenario loop** — driving → parked → child left behind → child
+removed, ~30 s per cycle — rewriting `ChildPresence.IsDetected` and
+`LowVoltageSystemState` on a timer.
+
+**VC reacts to BCM and transmits `VC_To_HMI` at 100 ms.** So even when quiet it is
+a *second transmitter* on any frame you write from the VSS side, and the value
+alternates between VC's and yours at cycle rate (finding F9).
+
+`vss-vcar/isolate.override.yml` removes both:
+
+```bash
+cd vss-vcar/build/vss_hmi_vcar
+docker compose -f docker-compose.yml -f ../../isolate.override.yml up -d
+```
+
+`BCM_SCENARIO=0` freezes the loop — BCM still provides the frame and serves its
+restbus, it just stops driving the values. `vc` is scaled to 0, so nothing
+contends for `VC_To_HMI`. Brokers and `topology-api` are untouched.
+
+Verified baseline, nothing touched for 8 s:
+
+```
+CAN  VSS_VehicleState.Vehicle_LowVoltageSystemState -> [4]     stable
+CAN  VC_To_HMI.TelltaleId                           -> [0]     stable
+VSS  Vehicle.LowVoltageSystemState                  -> "ON"    stable
+```
+
+Then one change each way, and only that changed:
+
+```
+restbus update ...Vehicle_LowVoltageSystemState:1
+  → VSS Vehicle.LowVoltageSystemState = LOCK
+
+actuate.py Vehicle.Cabin.HMI.TelltaleId 2
+  → CAN VC_To_HMI.TelltaleId = [2]          ← just 2, no alternation
+```
+
+Keep VC running (drop the `vc:` block) to watch the real CPD chain react instead —
+but then expect `VC_To_HMI` to alternate.
+
+### If signals still move on their own
+
+**Restbus state outlives the writer.** A frame added to a namespace keeps being
+transmitted cyclically by the *broker* even after the client that configured it
+has gone. Deleting the `vc` container does not stop `VC_To_HMI`.
+
+```bash
+remotive broker restbus reset --url http://127.0.0.1:50051 --namespace BCM-VehicleCAN
+remotive broker restbus reset --url http://127.0.0.1:50051 --namespace VC-VehicleCAN
+remotive broker restbus reset --url http://127.0.0.1:50051 --namespace topology-VehicleCAN
+```
+
+`reset` only clears the *calling client's* configuration, so state added by a
+process that has exited may survive it. The reliable clear is a full cycle:
+
+```bash
+docker compose -f docker-compose.yml -f ../../isolate.override.yml down
+docker compose -f docker-compose.yml -f ../../isolate.override.yml up -d
+```
+
+**Use `down`/`up`, not `restart`.** Restarting the brokers together leaves the leaf
+brokers unable to rejoin the topology broker — `remotive broker signals namespaces`
+then shows only `topology-VehicleCAN` and `virt`, and the bridge correctly reports
+every mapping skipped with *"namespace 'BCM-VehicleCAN' not present in the
+vehicle"*. A full `down`/`up` restores the dependency ordering.
+
+Check what the broker can actually see:
+
+```bash
+remotive broker signals namespaces --url http://127.0.0.1:50051
+# ["virt", "topology-VehicleCAN", "VC-VehicleCAN", "BCM-VehicleCAN"]
+```
+
+And confirm nothing else is writing:
+
+```bash
+pgrep -af kx-vss-bridge     # a leaked bridge is a second writer
+docker ps                   # bcm/vc running?
+podman ps                   # cpd-core also commands actuators through the bridge
+```
+
+---
+
 ## Watching it work
 
 Two things to change, two things to watch. Start the bridge first:
