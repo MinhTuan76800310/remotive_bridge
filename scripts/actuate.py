@@ -1,16 +1,14 @@
-"""Set a VSS actuation target — the way a real consumer must.
+"""Set a VSS actuation target — the way that tells you whether anyone heard.
 
     .venv/bin/python scripts/actuate.py Vehicle.Cabin.HMI.TelltaleId 2
 
-`kuksa-client`'s `set_target_values()` will not work here, and fails silently: it
-writes the v1 *Target Value* field, while a provider (the bridge) registers on the
-v2 `OpenProviderStream` and waits for *Actuation* requests. v1 has no actuation
-and v2 has no target value, so the write succeeds, reads back, and never reaches
-the provider. Measured on kuksa-client 0.5.2 — see docs/spike-f1-f6-findings.md
-(F11).
-
-`databroker-cli`'s `actuate` has the same problem for the same reason, so this
-script exists to give the one call that does work.
+`kuksa-client`'s `set_target_values()` writes the v1 *Target Value* field; this
+script issues a v2 `Actuate` request. Since `1b30420` the bridge reads both, so
+both reach CAN — but only `Actuate` reports back. Actuation is never buffered: it
+reaches a live provider or it fails `UNAVAILABLE: Provider ... does not exist`. A
+v1 write is stored whether or not a bridge exists, so its silent success is
+indistinguishable from a dead bridge. `databroker-cli`'s `actuate` also writes v1,
+hence this script. See docs/spike-f1-f6-findings.md (F11).
 """
 
 from __future__ import annotations

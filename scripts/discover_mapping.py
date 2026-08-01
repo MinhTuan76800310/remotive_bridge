@@ -170,7 +170,7 @@ def _emit(url: str, infos: list, kuksa_host: str, kuksa_port: int) -> None:
         out("# The broker reported no signals. Has the topology finished building?\n")
         return
 
-    out("# ── Remotive -> VSS : current values ───────────────────────────────────\n")
+    out("# ── Remotive -> VSS : current values ─────────────────────────────────\n")
     out("#\n")
     out("# `type` is MANDATORY. Without it kuksa-client fetches the type before\n")
     out("# every write, and Datapoint(\"0\") is truthy — an untyped CAN 0 would\n")
@@ -192,16 +192,17 @@ def _emit(url: str, infos: list, kuksa_host: str, kuksa_port: int) -> None:
             out("  #   type: TODO   # boolean | string | int | float\n")
 
     out("\n")
-    out("# ── VSS -> Remotive : actuation targets ────────────────────────────────\n")
+    out("# ── VSS -> Remotive : actuation targets ──────────────────────────────\n")
     out("#\n")
-    out("# Two measured warnings before you uncomment anything here:\n")
+    out("# One measured warning before you uncomment anything here:\n")
     out("#\n")
     out("# F9  Writing a frame an ECU ALSO transmits makes the bridge a second\n")
     out("#     transmitter; the value alternates at cycle rate. Frames with a\n")
     out("#     sender listed above are exactly those. Prefer a frame nobody drives.\n")
-    out("# F11 cpd-core 1.0.0 writes targets over KUKSA v1 while the bridge reads\n")
-    out("#     them over v2. The two never meet, silently. This direction will not\n")
-    out("#     fire for CPD until that is closed.\n")
+    out("#\n")
+    out("# F11 is closed (1b30420): the bridge reads targets over KUKSA v1 and v2\n")
+    out("#     at once, so it does not matter which one your writer speaks.\n")
+    out("#     cpd-core 1.0.0 writes v1; that now works.\n")
     out("to_can: []\n")
 
 
