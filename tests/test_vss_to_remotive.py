@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from kuksa_client.grpc import Datapoint
+from kuksa_client.grpc import Datapoint, Field, View, VSSClientError
 
 from kx_vss_bridge.config import load_config_text
 from kx_vss_bridge.state import BridgeState, Direction, Peer
@@ -163,6 +163,147 @@ async def test_a_null_datapoint_is_ignored():
     _, pending = await state.pending_snapshot(Direction.TO_CAN)
     assert pending == {}
     assert (await state.snapshot())["mapping"]["to_can_drops"] == 0
+
+
+async def test_a_v1_writer_reaches_can_even_though_v2_is_available():
+    """The bridge must accept a target from a v1 writer. Measured, not assumed.
+
+    cpd-core 1.0.0 pins kuksa-client==0.4.3, which contains no v2 code at all
+    (checked: 0 occurrences of "v2" in its grpc module), so its
+    `set_target_values` is a v1 Set. The CPD databroker — 0.7.1-dev, extracted
+    from ghcr.io/manh-108/cpd-databroker:latest — serves BOTH
+    /kuksa.val.v1.VAL/StreamedUpdate and /kuksa.val.v2.VAL/OpenProviderStream.
+
+    That combination is the trap. `subscribe_target_values` in kuksa-client
+    0.5.2 only falls back to v1 on UNIMPLEMENTED, and a broker serving v2 never
+    answers UNIMPLEMENTED — so a v2-only subscriber waits forever on a stream
+    nobody writes to, with no error on either side.
+
+    Subscribing to both is what makes the bridge a bridge: it is not the
+    bridge's business which protocol a writer chose.
+    """
+    state = BridgeState()
+    kuksa = FakeVSSClient(
+        KUKSA_PATHS,
+        v1_target_updates=[{HORN_PATH: Datapoint(True)}],
+    )
+    await _run_briefly(
+        run_kuksa_target_reader(
+            _config(), state, kuksa_factory=lambda: kuksa, sleep=RecordingSleep(1)
+        )
+    )
+    _, pending = await state.pending_snapshot(Direction.TO_CAN)
+    assert pending == {HORN_PATH: 1}
+
+
+async def test_v1_and_v2_writers_are_both_accepted_at_once():
+    """Two writers on different protocols, one buffer. Neither starves the other.
+
+    This is the shape the user asked for: more CPD instances change how many
+    signals arrive, not how many protocols the bridge must understand.
+    """
+    state = BridgeState()
+    kuksa = FakeVSSClient(
+        KUKSA_PATHS,
+        target_updates=[{TELLTALE_PATH: Datapoint(7)}],
+        v1_target_updates=[{HORN_PATH: Datapoint(True)}],
+    )
+    await _run_briefly(
+        run_kuksa_target_reader(
+            _config(), state, kuksa_factory=lambda: kuksa, sleep=RecordingSleep(1)
+        )
+    )
+    _, pending = await state.pending_snapshot(Direction.TO_CAN)
+    assert pending == {HORN_PATH: 1, TELLTALE_PATH: 7}
+
+
+async def test_the_v1_subscription_asks_for_target_values():
+    """v1 needs View.TARGET_VALUE explicitly; the default view would give current."""
+    state = BridgeState()
+    kuksa = FakeVSSClient(KUKSA_PATHS)
+    await _run_briefly(
+        run_kuksa_target_reader(
+            _config(), state, kuksa_factory=lambda: kuksa, sleep=RecordingSleep(1)
+        )
+    )
+    assert kuksa.subscribe_entries, "the bridge never opened a v1 subscription"
+    entries = kuksa.subscribe_entries[0]
+    assert {e.path for e in entries} == set(_config().to_can_by_vss)
+    assert all(e.view == View.TARGET_VALUE for e in entries)
+    assert all(Field.ACTUATOR_TARGET in e.fields for e in entries)
+
+
+async def test_one_protocol_failing_does_not_silence_the_other():
+    """A broker that rejects v1 must still deliver v2 targets, and vice versa.
+
+    Without this, adding the second subscription would make the bridge STRICTLY
+    worse: one unsupported protocol would take down a direction that used to
+    work.
+    """
+    state = BridgeState()
+    kuksa = FakeVSSClient(
+        KUKSA_PATHS,
+        target_updates=[{TELLTALE_PATH: Datapoint(7)}],
+        v1_subscribe_error=RuntimeError("v1 not served here"),
+    )
+    await _run_briefly(
+        run_kuksa_target_reader(
+            _config(), state, kuksa_factory=lambda: kuksa, sleep=RecordingSleep(1)
+        )
+    )
+    _, pending = await state.pending_snapshot(Direction.TO_CAN)
+    assert pending == {TELLTALE_PATH: 7}
+
+
+async def test_an_unserved_protocol_is_not_reported_as_an_error():
+    """UNIMPLEMENTED means "this broker has no such service" — ordinary, not a fault.
+
+    The distinction earns its keep: subscribing to both protocols means one of
+    them will legitimately be missing on many deployments. Counting that as an
+    error would light up /stats permanently and train the operator to ignore it,
+    which is how a REAL fault then goes unnoticed.
+    """
+    state = BridgeState()
+    kuksa = FakeVSSClient(
+        KUKSA_PATHS,
+        target_updates=[{TELLTALE_PATH: Datapoint(7)}],
+        v1_subscribe_error=VSSClientError(
+            error={"code": 12, "reason": "unimplemented", "message": "no v1 here"},
+            errors=[],
+        ),
+    )
+    await _run_briefly(
+        run_kuksa_target_reader(
+            _config(), state, kuksa_factory=lambda: kuksa, sleep=RecordingSleep(1)
+        )
+    )
+    snapshot = await state.snapshot()
+    assert snapshot["kuksa"]["last_error"] is None
+    assert snapshot["kuksa"]["errors"] == 0
+    # ...and the protocol that IS served still delivered.
+    _, pending = await state.pending_snapshot(Direction.TO_CAN)
+    assert pending == {TELLTALE_PATH: 7}
+
+
+async def test_a_real_failure_on_one_protocol_still_surfaces():
+    """Anything that is not UNIMPLEMENTED must reach /stats.
+
+    ALREADY_EXISTS (F4 — another provider owns the actuator) is the case that
+    matters: the direction is genuinely not working and the operator has to be
+    able to see why.
+    """
+    state = BridgeState()
+    kuksa = FakeVSSClient(
+        KUKSA_PATHS,
+        v1_subscribe_error=RuntimeError("ALREADY_EXISTS: provider owns it"),
+    )
+    await _run_briefly(
+        run_kuksa_target_reader(
+            _config(), state, kuksa_factory=lambda: kuksa, sleep=RecordingSleep(1)
+        )
+    )
+    snapshot = await state.snapshot()
+    assert "ALREADY_EXISTS" in snapshot["kuksa"]["last_error"]
 
 
 async def test_an_unmapped_target_path_is_ignored():

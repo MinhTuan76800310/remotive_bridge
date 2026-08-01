@@ -181,23 +181,32 @@ class FakeVSSClient:
         *,
         target_values: dict[str, Any] | None = None,
         target_updates: list[dict[str, Any]] | None = None,
+        v1_target_updates: list[dict[str, Any]] | None = None,
         connect_error: Exception | None = None,
         set_error: Exception | None = None,
         subscribe_error: Exception | None = None,
+        v1_subscribe_error: Exception | None = None,
         metadata_batch_error: Exception | None = None,
     ) -> None:
         self._known = set(known_paths)
         self._target_values = target_values or {}
         self._target_updates = target_updates or []
+        # Writers that reach the databroker over v1 (`set_target_values` in
+        # kuksa-client 0.4.3, which has no v2 at all). A real databroker serving
+        # both protocols delivers these ONLY to a v1 subscriber, which is the
+        # whole reason the bridge subscribes twice.
+        self._v1_target_updates = v1_target_updates or []
         self._connect_error = connect_error
         self._set_error = set_error
         self._subscribe_error = subscribe_error
+        self._v1_subscribe_error = v1_subscribe_error
         # Simulates a batch get_metadata failing because one path is unknown,
         # forcing the per-path fallback.
         self._metadata_batch_error = metadata_batch_error
 
         self.set_calls: list[list[Any]] = []
         self.metadata_calls: list[list[str]] = []
+        self.subscribe_entries: list[list[Any]] = []
         self.entered = 0
 
     async def __aenter__(self) -> FakeVSSClient:
@@ -230,14 +239,58 @@ class FakeVSSClient:
     async def subscribe_target_values(
         self, paths: Iterable[str], **kwargs: Any
     ) -> AsyncIterator[dict[str, Any]]:
+        """The v2 path: `OpenProviderStream` actuation requests.
+
+        On kuksa-client 0.5.2 this only falls back to v1 when the databroker
+        answers UNIMPLEMENTED. Against a broker that DOES serve v2 — 0.7.x and
+        later — it stays on v2 and never sees a v1 writer's targets.
+        """
         if self._subscribe_error is not None:
             raise self._subscribe_error
         for update in self._target_updates:
             yield update
             await asyncio.sleep(0)
+        # A real stream stays open. Without this, the v2 branch returning
+        # promptly would let a test pass on the v1 branch alone.
+        while True:
+            await asyncio.sleep(0)
+
+    async def subscribe(
+        self, entries: Iterable[Any], try_v2: bool = False, **kwargs: Any
+    ) -> AsyncIterator[list[Any]]:
+        """The v1 path: `Subscribe` with View.TARGET_VALUE.
+
+        Yields lists of update objects carrying `.entry.path` and
+        `.entry.actuator_target`, matching the real v1 stream shape.
+        """
+        recorded = list(entries)
+        self.subscribe_entries.append(recorded)
+        if self._v1_subscribe_error is not None:
+            raise self._v1_subscribe_error
+        for update in self._v1_target_updates:
+            yield [_V1Update(path, dp) for path, dp in update.items()]
+            await asyncio.sleep(0)
+        while True:
+            await asyncio.sleep(0)
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class _V1Entry:
+    path: str
+    actuator_target: Any
+
+
+@dataclass
+class _V1Update:
+    """One element of a v1 Subscribe stream: `update.entry.actuator_target`."""
+
+    entry: _V1Entry
+
+    def __init__(self, path: str, actuator_target: Any) -> None:
+        self.entry = _V1Entry(path, actuator_target)
 
 
 def signal(namespace: str, name: str, value: Any) -> Signal:

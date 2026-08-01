@@ -30,9 +30,17 @@ Three behaviours here are settled by measurement against a live vCar on
   transmitter and the value alternates at cycle rate (F9). Validation warns; the
   bridge does not refuse, because refusing would be wrong.
 
-Targets are seeded with `get_target_values()` before subscribing, because
-`subscribe_target_values` reports *changes*. A target set while the bridge was
-down would otherwise never arrive.
+Targets are read over **both KUKSA protocols at once**, v1 and v2. A bridge
+carries what arrives; which protocol a writer speaks is the writer's business.
+Measured on cpd-standalone-databroker 0.7.1-dev.0 (2026-08-02): a v1 target
+write reaches a v1 subscriber and is invisible to a v2 subscriber, and the
+client's own v1 fallback does not help because it triggers only on
+UNIMPLEMENTED — which a broker that serves v2 never returns. See
+`_subscribe_both_protocols`.
+
+Targets are seeded with `get_target_values()` before subscribing, because both
+subscriptions report *changes*. A target set while the bridge was down would
+otherwise never arrive.
 """
 
 from __future__ import annotations
@@ -40,7 +48,9 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Callable
 
+import grpc
 import structlog
+from kuksa_client.grpc import Field, SubscribeEntry, View
 from remotivelabs.broker.restbus import RestbusSignalConfig
 
 from kx_vss_bridge.config import BridgeConfig
@@ -74,6 +84,123 @@ async def _buffer_target(
     await state.put_latest(Direction.TO_CAN, mapping.vss, converted)
 
 
+_UNIMPLEMENTED = grpc.StatusCode.UNIMPLEMENTED.value[0]
+
+
+def _is_unimplemented(exc: BaseException) -> bool:
+    """True when the databroker has no such service, as opposed to a real fault.
+
+    `VSSClientError.error["code"]` carries the numeric gRPC code (12), set by
+    `from_grpc_error`. A bare `RpcError` can also surface when the failure
+    happens outside the client's own wrapping, so both shapes are checked.
+    """
+    error = getattr(exc, "error", None)
+    if isinstance(error, dict) and error.get("code") == _UNIMPLEMENTED:
+        return True
+    code = getattr(exc, "code", None)
+    try:
+        return callable(code) and code() == grpc.StatusCode.UNIMPLEMENTED
+    except Exception:  # pragma: no cover - defensive; code() should not raise
+        return False
+
+
+async def _drain_v2_targets(
+    kuksa: Any, state: BridgeState, index: dict[str, Any], paths: tuple[str, ...]
+) -> None:
+    """Consume the v2 actuation stream (`OpenProviderStream`) until it ends."""
+    async for updates in kuksa.subscribe_target_values(paths):
+        for path, datapoint in updates.items():
+            mapping = index.get(path)
+            if mapping is not None:
+                await _buffer_target(state, mapping, datapoint)
+
+
+async def _drain_v1_targets(
+    kuksa: Any, state: BridgeState, index: dict[str, Any], paths: tuple[str, ...]
+) -> None:
+    """Consume the v1 target stream (`Subscribe` + View.TARGET_VALUE).
+
+    `View.TARGET_VALUE` is not the default and has to be asked for: the default
+    view returns current values, which for an actuator is what an ECU reported,
+    not what a function commanded.
+    """
+    entries = [
+        SubscribeEntry(path, View.TARGET_VALUE, (Field.ACTUATOR_TARGET,))
+        for path in paths
+    ]
+    async for updates in kuksa.subscribe(entries=entries):
+        for update in updates:
+            entry = getattr(update, "entry", None)
+            if entry is None:
+                continue
+            mapping = index.get(entry.path)
+            if mapping is not None:
+                await _buffer_target(state, mapping, entry.actuator_target)
+
+
+async def _subscribe_both_protocols(
+    kuksa: Any, state: BridgeState, index: dict[str, Any], paths: tuple[str, ...]
+) -> None:
+    """Read targets over v1 AND v2 at once, tolerating either being absent.
+
+    A bridge's job is to carry whatever arrives. Which KUKSA protocol a writer
+    speaks is that writer's business, and the bridge has no standing to insist:
+    one CPD instance or five, the difference is how many signals arrive, not how
+    many protocols have to be understood.
+
+    Both are needed because neither alone is sufficient in the field:
+
+    * **v2 only** misses cpd-core 1.0.0, which pins kuksa-client==0.4.3 — a
+      version with no v2 code whatsoever, so its `set_target_values` is a v1
+      Set. kuksa-client 0.5.2's own v1 fallback does not save us: it triggers
+      only on UNIMPLEMENTED, and the CPD databroker (0.7.1-dev) *does* serve
+      /kuksa.val.v2.VAL/OpenProviderStream. Serving v2 is exactly what disables
+      the fallback.
+    * **v1 only** misses any newer provider that actuates over v2, including
+      kuksa-client 0.5.2's own `set_target_values` against a v2 broker.
+
+    A protocol the databroker does not serve raises here rather than yielding.
+    That must not take the other one down — losing a working direction because
+    of an unsupported one would make this change a regression — so each is
+    supervised independently.
+
+    But "unsupported" and "broken" are different, and flattening them would hide
+    real faults. UNIMPLEMENTED means this databroker simply has no such service:
+    ordinary, logged at info, dormant. Anything else — ALREADY_EXISTS when
+    another provider owns the actuator (F4), a permission denial, a transport
+    failure — is a fault the operator has to see, so it is recorded on the peer
+    and surfaces in /stats as `last_error`.
+    """
+
+    async def guard(name: str, coro: Any) -> None:
+        try:
+            await coro
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if _is_unimplemented(exc):
+                log.info(
+                    "databroker does not serve this target protocol; ignoring it",
+                    protocol=name,
+                    error=str(exc),
+                )
+                return
+            log.warning(
+                "target subscription failed", protocol=name, error=str(exc)
+            )
+            await state.record_reconnect(Peer.KUKSA, exc)
+
+    async with asyncio.TaskGroup() as group:
+        group.create_task(
+            guard("v2", _drain_v2_targets(kuksa, state, index, paths)),
+            name="kuksa-targets-v2",
+        )
+        group.create_task(
+            guard("v1", _drain_v1_targets(kuksa, state, index, paths)),
+            name="kuksa-targets-v1",
+        )
+
+
 async def run_kuksa_target_reader(
     config: BridgeConfig,
     state: BridgeState,
@@ -95,21 +222,16 @@ async def run_kuksa_target_reader(
             async with kuksa_factory() as kuksa:
                 await state.set_peer(Peer.KUKSA, connected=True, phase="reading targets")
 
-                # Seed first: subscribe_target_values only reports changes, so a
-                # target set before we connected would never be delivered.
+                # Seed first: the subscriptions report changes only, so a target
+                # set before we connected would never be delivered.
                 for path, datapoint in (await kuksa.get_target_values(paths)).items():
                     mapping = index.get(path)
                     if mapping is not None:
                         await _buffer_target(state, mapping, datapoint)
 
-                async for updates in kuksa.subscribe_target_values(paths):
-                    for path, datapoint in updates.items():
-                        mapping = index.get(path)
-                        if mapping is None:
-                            continue
-                        await _buffer_target(state, mapping, datapoint)
+                await _subscribe_both_protocols(kuksa, state, index, paths)
 
-                log.warning("kuksa target stream ended; reconnecting")
+                log.warning("kuksa target streams ended; reconnecting")
                 await state.set_peer(Peer.KUKSA, connected=False, phase="reconnecting")
 
         except asyncio.CancelledError:
