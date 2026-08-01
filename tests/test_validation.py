@@ -163,6 +163,38 @@ async def test_skipped_entries_are_reported_as_plain_dicts():
     assert set(result.skipped[0]) >= {"entry", "reason"}
 
 
+async def test_direction_is_stamped_on_skipped_entries():
+    text = CONFIG.replace(BCM_NS, "NoSuchNamespace", 1)
+    result = await validate_mapping(_config(text), _broker(), FakeVSSClient(VSS_PATHS))
+    assert result.skipped[0]["direction"] == "to_vss"
+
+
+async def test_direction_is_stamped_on_warnings():
+    result = await validate_mapping(
+        _config(), _broker(sender=["BCM"]), FakeVSSClient(VSS_PATHS)
+    )
+    assert result.warnings[0]["direction"] == "to_can"
+
+
+async def test_direction_names_the_entrys_own_section():
+    """Both sections are validated on every call, whoever is asking.
+
+    So the stamp has to come from the entry, not the caller. Breaking only the
+    to_can entry must report `to_can` — a caller-supplied direction would label
+    it with whichever loop happened to run.
+    """
+    text = CONFIG.replace(BCM_NS, "GhostCAN").replace("GhostCAN", BCM_NS, 1)
+    result = await validate_mapping(_config(text), _broker(), FakeVSSClient(VSS_PATHS))
+    assert [e["direction"] for e in result.skipped] == ["to_can"]
+
+
+async def test_both_sections_are_stamped_in_one_call():
+    """One call, one broken entry each side, each labelled with its own section."""
+    text = CONFIG.replace(BCM_NS, "GhostCAN")
+    result = await validate_mapping(_config(text), _broker(), FakeVSSClient(VSS_PATHS))
+    assert [e["direction"] for e in result.skipped] == ["to_vss", "to_can"]
+
+
 # ── warnings: F9 and F10, both measured ──────────────────────────────────────
 
 
@@ -183,7 +215,7 @@ async def test_allow_add_false_on_an_undriven_frame_warns_about_silent_no_op():
         "transform: {op: threshold, gt: 0}\n    allow_add: false",
     )
     result = await validate_mapping(
-        _config(text), _broker(sender=[]), FakeVSSClient(VSS_PATHS)
+        _config(text), _broker(sender=[]), FakeVSSClient(VSS_PATHS),
     )
     notes = " ".join(w["note"] for w in result.warnings)
     assert "silently" in notes.lower() or "ignored" in notes.lower()
@@ -195,7 +227,7 @@ async def test_no_no_op_warning_when_the_frame_is_driven_by_an_ecu():
         "transform: {op: threshold, gt: 0}\n    allow_add: false",
     )
     result = await validate_mapping(
-        _config(text), _broker(sender=["BCM"]), FakeVSSClient(VSS_PATHS)
+        _config(text), _broker(sender=["BCM"]), FakeVSSClient(VSS_PATHS),
     )
     notes = " ".join(w["note"] for w in result.warnings)
     assert "silently" not in notes.lower()

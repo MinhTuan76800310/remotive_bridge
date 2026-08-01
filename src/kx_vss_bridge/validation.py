@@ -120,6 +120,14 @@ async def _resolve_vss_paths(kuksa: _Kuksa, paths: tuple[str, ...]) -> set[str]:
 async def validate_mapping(
     config: BridgeConfig, broker: _Broker, kuksa: _Kuksa
 ) -> ValidatedMapping:
+    """Check the mapping against both peers.
+
+    Both directions are validated on every call, whichever loop is asking: the
+    result is a property of the mapping and the vehicle, not of the caller. So
+    each skip and warning is stamped with the section the *entry* lives in —
+    `to_vss` or `to_can` — and not with the loop that happened to run first.
+    Stamping the caller would label a to_can drop `to_vss` half the time.
+    """
     frame_index = _index_frames(await broker.list_frame_infos(*config.all_namespaces))
     live_namespaces = {namespace for namespace, _ in frame_index}
     known_paths = await _resolve_vss_paths(kuksa, config.all_vss_paths)
@@ -136,6 +144,7 @@ async def validate_mapping(
 
             if mapping.can.namespace not in live_namespaces:
                 skipped.append({
+                    "direction": section,
                     "entry": label,
                     "reason": f"namespace {mapping.can.namespace!r} not present in the vehicle",
                 })
@@ -144,6 +153,7 @@ async def validate_mapping(
             found = frame_index.get((mapping.can.namespace, mapping.can.signal))
             if found is None:
                 skipped.append({
+                    "direction": section,
                     "entry": label,
                     "reason": f"signal {mapping.can.signal!r} not in {mapping.can.namespace!r}",
                 })
@@ -151,6 +161,7 @@ async def validate_mapping(
 
             if mapping.vss not in known_paths:
                 skipped.append({
+                    "direction": section,
                     "entry": label,
                     "reason": f"VSS path {mapping.vss!r} not in the databroker catalog",
                 })
@@ -165,6 +176,7 @@ async def validate_mapping(
                 # a frame that is never transmitted will not appear, and
                 # on_change may never fire either.
                 warnings.append({
+                    "direction": section,
                     "frame": info.name,
                     "namespace": info.namespace,
                     "note": "frame has no cycle time; seeding cannot reach it and "
@@ -182,6 +194,7 @@ async def validate_mapping(
                     if senders:
                         warned_frames.add(frame_key)
                         warnings.append({
+                            "direction": section,
                             "frame": info.name,
                             "namespace": info.namespace,
                             "sender": senders,
@@ -192,6 +205,7 @@ async def validate_mapping(
                     elif not mapping.allow_add:
                         warned_frames.add(frame_key)
                         warnings.append({
+                            "direction": section,
                             "frame": info.name,
                             "namespace": info.namespace,
                             "note": "no ECU transmits this frame and allow_add is false, so "
