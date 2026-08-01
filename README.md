@@ -69,12 +69,9 @@ The default is host networking because the example mapping points at
 `127.0.0.1`. On a bridged network that address is the container itself, not your
 peers — change both together.
 
-**One-time, after the first successful build:** GHCR creates a new package
-*private*, so `docker pull` fails with `unauthorized` for everyone but you. Make
-it public at
-`github.com/users/MinhTuan76800310/packages/container/remotive_bridge/settings`
-→ *Change visibility* → Public. Until then, users need
-`docker login ghcr.io` with a `read:packages` token.
+No login is needed to pull: the package inherits this repository's public
+visibility. Verified anonymously against the first published build — the registry
+serves the manifest with a token carrying no credentials.
 
 ---
 
