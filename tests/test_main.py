@@ -296,6 +296,122 @@ def test_an_unrecognised_format_refuses_to_start():
         _configure_logging("INFO", log_format="colour", is_tty=False)
 
 
+# ── renderer selection, through the real defaults ────────────────────────────
+#
+# Everything above passes `log_format=` and `is_tty=` explicitly, so the
+# production selection path — read KX_LOG_FORMAT, else `sys.stdout.isatty()` —
+# is never taken. That was proven by mutation: deleting the `os.environ` read
+# entirely left the whole suite passing, and so did replacing the `isatty()`
+# fallback with a constant. The feature's headline behaviour rested on nothing.
+#
+# These tests therefore CANNOT use `_emit`. It pops KX_LOG_FORMAT from the
+# environment and passes both parameters explicitly, which is exactly the
+# bypass they exist to close. Do not "simplify" them back into it — doing so
+# re-blinds the suite to the two defaults below.
+
+
+class _FakeStdout(io.StringIO):
+    """A buffer with a chosen `isatty()`.
+
+    `_configure_logging` reads `sys.stdout.isatty()` *while configuring*, so the
+    substitution has to be in place before the call — unlike `_emit`, which
+    swaps stdout afterwards. A plain `io.StringIO` always reports False, which
+    would make the console branch unreachable.
+    """
+
+    def __init__(self, tty: bool) -> None:
+        super().__init__()
+        self._tty = tty
+
+    def isatty(self) -> bool:
+        return self._tty
+
+
+def _emit_via_defaults(emit, *, tty: bool) -> str:
+    """Capture one emission from `_configure_logging("INFO")` — no keywords.
+
+    The env var is left to the caller's `monkeypatch` (which restores it); every
+    other global this touches — root handlers, root level, `sys.stdout` and the
+    structlog config — is restored here in `finally`, as `_emit` does.
+    """
+    buf = _FakeStdout(tty)
+    root = logging.getLogger()
+    saved_handlers = root.handlers[:]
+    saved_level = root.level
+    saved_stdout = sys.stdout
+    saved_config = structlog.get_config()
+    root.handlers = []
+    sys.stdout = buf
+    try:
+        # No log_format=, no is_tty= — that is the entire point of this helper.
+        _configure_logging("INFO")
+        _assert_not_routed_through_stdlib()
+        for handler in root.handlers:
+            if hasattr(handler, "stream"):
+                handler.stream = buf
+        emit()
+    finally:
+        sys.stdout = saved_stdout
+        root.handlers = saved_handlers
+        root.setLevel(saved_level)
+        structlog.configure(**saved_config)
+    return buf.getvalue()
+
+
+def _is_json(line: str) -> bool:
+    try:
+        json.loads(line)
+    except json.JSONDecodeError:
+        return False
+    return True
+
+
+@pytest.mark.parametrize("value, tty", [("json", True), ("console", False)])
+def test_the_env_var_selects_the_renderer_with_no_parameter_passed(
+    monkeypatch, value, tty
+):
+    """KX_LOG_FORMAT beats the TTY — read from the real environment.
+
+    Each case sets the TTY to the *opposite* of what the variable asks for, so
+    a build that ignored the environment and fell through to `isatty()` would
+    produce the other renderer and fail.
+    """
+    monkeypatch.setenv("KX_LOG_FORMAT", value)
+    line = _emit_via_defaults(_bridge_event, tty=tty)
+    assert _is_json(line) is (value == "json")
+    assert "mapping warning" in line
+
+
+@pytest.mark.parametrize("tty, expect_json", [(True, False), (False, True)])
+def test_without_the_env_var_the_tty_decides(monkeypatch, tty, expect_json):
+    """Both branches of the `sys.stdout.isatty()` fallback."""
+    monkeypatch.delenv("KX_LOG_FORMAT", raising=False)
+    line = _emit_via_defaults(_bridge_event, tty=tty)
+    assert _is_json(line) is expect_json
+    assert "mapping warning" in line
+
+
+@pytest.mark.parametrize("tty, expect_json", [(True, False), (False, True)])
+def test_an_empty_env_var_is_treated_as_unset(monkeypatch, tty, expect_json):
+    """`KX_LOG_FORMAT=` must fall through to the TTY check, not raise.
+
+    `docker run -e KX_LOG_FORMAT`, a compose `- KX_LOG_FORMAT=${KX_LOG_FORMAT}`
+    with the outer variable unset, and a `.env` line `KX_LOG_FORMAT=` all export
+    "". Raising on those killed the bridge at boot with an uncaught traceback.
+    """
+    monkeypatch.setenv("KX_LOG_FORMAT", "")
+    line = _emit_via_defaults(_bridge_event, tty=tty)
+    assert _is_json(line) is expect_json
+    assert "mapping warning" in line
+
+
+def test_a_non_empty_typo_in_the_env_var_still_refuses_to_start(monkeypatch):
+    """Empty is forgiven; a typo is not — read from the environment, not an argument."""
+    monkeypatch.setenv("KX_LOG_FORMAT", "colour")
+    with pytest.raises(ValueError, match="KX_LOG_FORMAT"):
+        _configure_logging("INFO")
+
+
 @pytest.mark.parametrize("log_format, is_tty", [("json", False), ("console", True)])
 def test_an_info_event_survives_a_root_logger_at_warning(log_format, is_tty):
     """The failure mode that got the stdlib-routing design rejected.
@@ -316,10 +432,29 @@ def test_an_info_event_survives_a_root_logger_at_warning(log_format, is_tty):
     assert "info survives" in out
 
 
-def test_console_colour_appears_only_in_the_level_column():
-    line = _emit("console", True, _bridge_event)
+@pytest.mark.parametrize(
+    "level, colour",
+    [("info", "\x1b[32m"), ("warning", "\x1b[33m"), ("error", "\x1b[31m")],
+)
+def test_console_colour_appears_only_in_the_level_column(level, colour):
+    """All three levels the feature names, not just `warning`.
+
+    A style regression confined to `info` or `error` passed the single-level
+    version of this test. The expected escape is pinned per level too, so a
+    swap of green for red would fail rather than merely finding *a* colour.
+    """
+    line = _emit(
+        "console",
+        True,
+        lambda: getattr(structlog.get_logger("kx"), level)(
+            "mapping warning", direction="to_can", frame="VC_To_HMI"
+        ),
+    )
     match = re.search(r"\x1b\[3[0-7]m", line)
-    assert match, "expected a colour escape in the level column"
+    assert match, f"expected a colour escape in the {level} level column"
+    assert match.group() == colour, (
+        f"{level} rendered {match.group()!r}, expected {colour!r}"
+    )
     tail = line[match.end():]
     stray = [
         esc

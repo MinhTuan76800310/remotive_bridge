@@ -26,6 +26,7 @@ from kx_vss_bridge.state import BridgeState, Direction, Peer
 from kx_vss_bridge.vss_to_remotive import (
     run_kuksa_target_reader,
     run_remotive_restbus_writer,
+    run_vss_to_remotive,
 )
 from tests.fakes import (
     FakeBrokerClient,
@@ -461,6 +462,16 @@ async def test_every_frame_is_added_in_exactly_one_call():
 
 
 async def test_restbus_writer_logs_connect_and_restbus_started():
+    """Counts, not membership.
+
+    Membership alone let a second `restbus started` inside the per-batch flush
+    loop pass green — i.e. an event firing at CAN cycle rate would have shipped.
+    All four are once-per-connection here because this test runs the *writer
+    alone*; `kuksa connected` is 2 for a full `run_vss_to_remotive`, where the
+    target reader owns its own KUKSA connection (see
+    `test_full_loop_b_connects_to_kuksa_once_per_connection`). Counts observed,
+    not assumed.
+    """
     broker = _broker()
     with structlog.testing.capture_logs() as captured:
         await _run_briefly(
@@ -470,10 +481,33 @@ async def test_restbus_writer_logs_connect_and_restbus_started():
             )
         )
     events = [entry["event"] for entry in captured]
-    assert "remotive connected" in events
-    assert "kuksa connected" in events
-    assert "mapping validated" in events
-    assert "restbus started" in events
+    assert events.count("remotive connected") == 1
+    assert events.count("kuksa connected") == 1
+    assert events.count("mapping validated") == 1
+    assert events.count("restbus started") == 1
+
+
+async def test_full_loop_b_connects_to_kuksa_once_per_connection():
+    """Two KUKSA connections, so two `kuksa connected` — and that is correct.
+
+    `run_kuksa_target_reader` and `run_remotive_restbus_writer` each own their
+    own `VSSClient`. Pinning the count here is what stops someone "fixing" the
+    duplicate by making the event fire once per *worker pair* — which would then
+    hide a genuinely missing connection — and what stops the count drifting
+    above 2 if either worker started reconnecting per batch.
+    """
+    broker = _broker()
+    with structlog.testing.capture_logs() as captured:
+        await _run_briefly(
+            run_vss_to_remotive(
+                _config(), BridgeState(), broker_factory=lambda: broker,
+                kuksa_factory=lambda: FakeVSSClient(KUKSA_PATHS), sleep=RecordingSleep(1),
+            )
+        )
+    events = [entry["event"] for entry in captured]
+    assert events.count("kuksa connected") == 2  # one per connection, not per loop
+    assert events.count("remotive connected") == 1  # only the writer holds a broker
+    assert events.count("restbus started") == 1
 
 
 async def test_target_reader_logs_kuksa_connected_but_not_remotive():
@@ -487,7 +521,7 @@ async def test_target_reader_logs_kuksa_connected_but_not_remotive():
             )
         )
     events = [entry["event"] for entry in captured]
-    assert "kuksa connected" in events
+    assert events.count("kuksa connected") == 1
     assert "remotive connected" not in events
 
 

@@ -125,7 +125,13 @@ async def test_reader_seeds_then_streams():
 
 
 async def test_reader_logs_connect_and_validation_events():
-    """A successful connect must say so; silence reads as a hang."""
+    """A successful connect must say so; silence reads as a hang.
+
+    Counts, not membership: membership alone would pass an event that fired on
+    every batch rather than once per connection. One each is correct for Loop A
+    — the reader holds a single broker and a single KUKSA connection. Observed,
+    not assumed.
+    """
     broker = _broker(hang_after_batches=True)
     with structlog.testing.capture_logs() as captured:
         await _run_briefly(
@@ -135,9 +141,9 @@ async def test_reader_logs_connect_and_validation_events():
             )
         )
     events = [entry["event"] for entry in captured]
-    assert "remotive connected" in events
-    assert "kuksa connected" in events
-    assert "mapping validated" in events
+    assert events.count("remotive connected") == 1
+    assert events.count("kuksa connected") == 1
+    assert events.count("mapping validated") == 1
 
 
 async def test_connect_events_carry_the_direction():
