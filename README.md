@@ -578,12 +578,18 @@ the readable console format and everything else — a pipe, a CI runner,
 | `KX_LOG_FORMAT` | Renderer |
 |---|---|
 | unset | console on a TTY, JSON otherwise |
+| empty (`KX_LOG_FORMAT=`) | treated as unset |
 | `console` | console, always |
 | `json` | one JSON object per line, always |
 
-Any other value — **including the empty string** — is a startup error. There is no
-silent fallback, because a typo that quietly kept the old format would look like
-it had worked.
+An **empty** value is treated as unset and falls through to the TTY check.
+`docker run -e KX_LOG_FORMAT` with no value, a compose
+`environment: - KX_LOG_FORMAT=${KX_LOG_FORMAT}` whose outer variable is unset, and a
+`.env` line `KX_LOG_FORMAT=` all export the empty string; every one of those means
+"I did not set this", and none of them should stop the process.
+
+Any other **non-empty** value is a startup error. There is no silent fallback for a
+typo, because one that quietly kept the old format would look like it had worked.
 
 Console mode colours **only the level column** (green info · yellow warning · red
 error). Keys are dimmed and values are plain, so the one cue that matters is not
@@ -622,7 +628,7 @@ bridge.
 
 ```bash
 uv sync --dev
-uv run pytest -q          # 241 tests, no vCar or databroker needed
+uv run pytest -q          # no vCar or databroker needed
 ```
 
 The suite uses fake peers throughout. Both loops and validation were additionally

@@ -150,6 +150,14 @@ def _configure_logging(
     the defaults read KX_LOG_FORMAT and sys.stdout.isatty().
     """
     chosen = log_format if log_format is not None else os.environ.get("KX_LOG_FORMAT")
+    if chosen == "":
+        # Exported-but-empty means "I did not set this", and must not stop the
+        # process. `docker run -e KX_LOG_FORMAT`, a compose
+        # `- KX_LOG_FORMAT=${KX_LOG_FORMAT}` whose outer variable is unset, and
+        # a `.env` line `KX_LOG_FORMAT=` all arrive here as "". Raising killed
+        # the bridge at boot with an uncaught traceback for a variable nobody
+        # had deliberately set. A non-empty typo still raises, below.
+        chosen = None
     if chosen not in (None, "console", "json"):
         # A typo must not look like it worked.
         raise ValueError(f"KX_LOG_FORMAT must be 'console' or 'json', got {chosen!r}")
